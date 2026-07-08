@@ -102,29 +102,33 @@
     <button id="howBack" class="ghost">Back</button>
   </section>
 
-  <!-- ── PAIR: your QR + live camera, both at once ── -->
+  <!-- ── PAIR: big QR left, everything else (camera + copy) right ── -->
   <section id="pair" class="card hidden">
-    <p id="pairIntro">Point the two devices at each other. The code below is yours; the camera reads theirs. Data goes straight between the devices. Nothing is uploaded.</p>
-    <div id="pairQr" class="qr"></div>
-    <div class="scanview" id="pairCam"><video id="pairVideo" playsinline muted></video><div class="scanframe"></div></div>
-    <div class="status"><span id="pairDot" class="dot wait"></span><span id="pairStatus">Looking for the other device…</span></div>
-    <label class="toggle"><input type="checkbox" id="stunToggle">
-      <span>Connect across networks<em>Off = same network only, no server contact. On uses a STUN server (reveals your public IP to it). Both devices must enable it.</em></span>
-    </label>
-    <details class="fallback">
-      <summary><span data-icon="link"></span>No camera? Share a link instead</summary>
-      <p style="margin-top:12px">Send this link to the other device (WhatsApp, Signal, mail) and keep this tab open until they join.</p>
-      <div class="row">
-        <button id="shareLink" class="ghost"><span data-icon="share"></span>Share link</button>
-        <button id="copyLink" class="ghost"><span data-icon="copy"></span>Copy</button>
+    <div class="pairgrid">
+      <div id="pairQr" class="qr"></div>
+      <div class="paircol">
+        <p id="pairIntro">Point the two devices at each other. This QR code is yours; the camera reads theirs. Data goes straight between the devices. Nothing is uploaded.</p>
+        <div class="scanview" id="pairCam"><video id="pairVideo" playsinline muted></video><div class="scanframe"></div></div>
+        <div class="status"><span id="pairDot" class="dot wait"></span><span id="pairStatus">Looking for the other device…</span></div>
+        <label class="toggle"><input type="checkbox" id="stunToggle">
+          <span>Connect across networks<em>Off = same network only, no server contact. On uses a STUN server (reveals your public IP to it). Both devices must enable it.</em></span>
+        </label>
+        <details class="fallback">
+          <summary><span data-icon="link"></span>No camera? Share a link instead</summary>
+          <p style="margin-top:12px">Send this link to the other device (WhatsApp, Signal, mail) and keep this tab open until they join.</p>
+          <div class="row">
+            <button id="shareLink" class="ghost"><span data-icon="share"></span>Share link</button>
+            <button id="copyLink" class="ghost"><span data-icon="copy"></span>Copy</button>
+          </div>
+          <div id="pairLink" class="link"></div>
+          <details style="margin-top:12px">
+            <summary>Got a code from the other device? Paste it</summary>
+            <textarea id="pasteCode" rows="3" placeholder="Link or code" style="margin-top:10px"></textarea>
+            <button id="applyPaste" class="ghost" style="margin-top:8px">Apply</button>
+          </details>
+        </details>
       </div>
-      <div id="pairLink" class="link"></div>
-      <details style="margin-top:12px">
-        <summary>Got a code from the other device? Paste it</summary>
-        <textarea id="pasteCode" rows="3" placeholder="Link or code" style="margin-top:10px"></textarea>
-        <button id="applyPaste" class="ghost" style="margin-top:8px">Apply</button>
-      </details>
-    </details>
+    </div>
   </section>
 
   <!-- ── HANDOFF tab (#a=) ── -->

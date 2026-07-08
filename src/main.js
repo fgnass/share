@@ -152,14 +152,16 @@ async function share(url) {
   try { await navigator.clipboard.writeText(url); alert("Link copied"); } catch {}
 }
 
-// Render a QR for `url` into a white framed box (fixed square canvas, no distortion).
+// Render a QR for `url` into a white framed box. The bitmap is generated large
+// and displayed responsively (CSS sizes the frame), so it fills the available
+// space on a big screen — a webcam across the room needs the code physically
+// big to resolve it. Low error-correction keeps a long payload scannable.
 async function renderQr(box, url) {
   const canvas = document.createElement("canvas");
-  // 440px bitmap for crispness; low error-correction keeps a long payload scannable.
-  await QRCode.toCanvas(canvas, url, { errorCorrectionLevel: "L", margin: 1, width: 440 });
-  // qrcode sets an inline style width/height — override it to a fixed square so
-  // the stylesheet size wins and the aspect ratio can never distort.
-  canvas.style.width = canvas.style.height = "216px";
+  await QRCode.toCanvas(canvas, url, { errorCorrectionLevel: "L", margin: 1, width: 960 });
+  // qrcode sets an inline style width/height — override to fluid so the frame's
+  // CSS width wins; the canvas is square so height:auto can't distort it.
+  canvas.style.width = "100%"; canvas.style.height = "auto";
   const frame = document.createElement("div");
   frame.className = "qr-frame";
   frame.appendChild(canvas);
@@ -338,6 +340,7 @@ let role = null;          // "offerer" | "answerer"
 let committed = false;    // decided to answer, or applied an answer, or connected
 let applied = false;      // an answer has been applied to our offer
 let myLink = null;        // our current QR/link URL
+let myCode = null;        // the code inside our own QR — ignored if the camera sees it (reflections/"mirror")
 let lastOfferCode = null; // offer we're answering (for regenerate on toggle)
 
 function setStatus(text, dot = "wait") { $("pairStatus").textContent = text; $("pairDot").className = "dot " + dot; }
@@ -413,7 +416,8 @@ async function mintOffer() {
   setupChannel(pc.createDataChannel("data"));
   await pc.setLocalDescription(await pc.createOffer());
   await iceComplete(pc);
-  myLink = linkFor("o", encode(pc.localDescription));
+  myCode = encode(pc.localDescription);
+  myLink = linkFor("o", myCode);
   $("pairLink").textContent = myLink;
   await renderQr($("pairQr"), myLink);
   setStatus("Looking for the other device…");
@@ -470,7 +474,8 @@ async function buildAnswer(code) {
     setStatus("Invalid or expired code", "err");
     return;
   }
-  myLink = linkFor("a", encode(pc.localDescription));
+  myCode = encode(pc.localDescription);
+  myLink = linkFor("a", myCode);
   $("pairLink").textContent = myLink;
   await renderQr($("pairQr"), myLink);
   setStatus("Waiting for them to scan this…");
@@ -478,6 +483,9 @@ async function buildAnswer(code) {
 
 // Every scanned/pasted code lands here. `manual` = pasted (skip tiebreak).
 function onScan(parsed, manual = false) {
+  // Ignore our own code bouncing back (a reflection / "mirror") — otherwise the
+  // offerer would treat it as a nonce tie and reroll its offer forever.
+  if (parsed.code === myCode) return;
   let dec;
   try { dec = decode(parsed.code); } catch { return; }
   if (parsed.type === "a") {                 // an answer to our offer

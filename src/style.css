@@ -35,7 +35,7 @@ body {
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
-main { width: 100%; max-width: 460px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+main { width: 100%; max-width: 1200px; flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; }
 
 /* ── Typography ── */
 h1 {
@@ -68,7 +68,13 @@ h1 span { font-variation-settings: "opsz" 144, "wght" 500, "wdth" 100; opacity: 
 summary { color: var(--muted); font-size: 0.8rem; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; }
 
 /* ── Cards ── */
+/* main is a wide, centered column; cards stay a comfortable reading width and
+   center themselves. The pair screen opts into more width (see below) so the QR
+   and camera can sit side by side without shrinking. */
 .card {
+  width: 100%;
+  max-width: 520px;
+  margin-inline: auto;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 22px;
@@ -173,10 +179,40 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .link:empty { display: none; }
 
 /* ── QR + scanner ── */
-.qr { margin-top: 16px; display: flex; justify-content: center; }
-.qr-frame { background: #fff; padding: 14px; border-radius: 16px; line-height: 0; }
-.qr-frame canvas { display: block; width: 216px; height: 216px; }
+/* The QR is a canvas that keeps its 1:1 ratio (width/height:auto) and shrinks to
+   fit within max-width/max-height. The white frame is the canvas's own padding,
+   so nothing can distort. The frame wrapper is display:contents so the canvas
+   sizes directly against its column. On phones it's full width; on a laptop
+   (below) its size is driven straight off the viewport height so it fills the
+   screen without ever overflowing — no dependency on an indefinite flex height. */
+.qr { display: flex; align-items: center; justify-content: center; }
+.qr-frame { display: contents; }
+.qr-frame canvas {
+  display: block; box-sizing: border-box;
+  max-width: 100%; max-height: 100%; width: auto; height: auto;
+  background: #fff; padding: 14px; border-radius: 16px;
+}
 .scanview { position: relative; margin: 16px auto 0; width: 216px; max-width: 100%; border-radius: 18px; overflow: hidden; background: #000; aspect-ratio: 1; }
+
+/* Pair layout: stacked on phones; on wider screens the QR fills the full height
+   in a left column and ALL copy + the camera move to a scrollable right column,
+   so no text sits above or below the QR to steal its height. */
+.pairgrid { display: flex; flex-direction: column; }
+.paircol { display: flex; flex-direction: column; margin-top: 16px; }
+@media (min-width: 680px) {
+  #pair { width: auto; max-width: 100%; }   /* wrap the content instead of the 520px cap; main centers it */
+  .pairgrid { flex-direction: row; align-items: stretch; gap: 24px; max-height: calc(100svh - 130px); }
+  .pairgrid > .qr { flex: 0 0 auto; }
+  /* Size the QR off the viewport directly: as tall as the screen minus the body
+     + card padding, and no wider than the space left beside the 300px column. */
+  .qr-frame canvas {
+    max-height: calc(100svh - 130px);
+    max-width: calc(min(100vw - 32px, 1200px) - 368px);
+  }
+  .paircol { flex: 0 0 300px; margin-top: 0; min-height: 0; overflow-y: auto; }
+  .paircol #pairIntro { margin-top: 0; }
+  .paircol .scanview { margin: 0 0 4px; width: 100%; }            /* camera at top of the right column */
+}
 /* Mirror the preview so movement matches the user like a mirror; the QR decode
    reads the raw (un-mirrored) video frame, so scanning is unaffected. */
 .scanview video { width: 100%; height: 100%; object-fit: cover; display: block; transform: scaleX(-1); }
