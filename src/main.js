@@ -1,12 +1,14 @@
 import QRCode from "qrcode";
 import jsQR from "jsqr";
-import { createElement, Paperclip, Send, FileText, Download, QrCode, ScanLine, X, Share2, Copy, Link2, Github } from "lucide";
+import { createElement, Paperclip, Send, FileText, Download, QrCode, ScanLine, X, Share2, Copy, Link2, Github, Volume2, Mic, RefreshCw, ArrowLeft } from "lucide";
+import { playBytes, startListening, stopAudio, setUltrasound } from "./audio.js";
 import "./style.css";
 
 // ─────────── Lucide icons ───────────
 const ICONS = {
   paperclip: Paperclip, send: Send, file: FileText, download: Download,
   "qr-code": QrCode, scan: ScanLine, x: X, share: Share2, copy: Copy, link: Link2, github: Github,
+  volume: Volume2, mic: Mic, switch: RefreshCw, back: ArrowLeft,
 };
 function icon(name) { return createElement(ICONS[name]); }
 // Replace every <span data-icon="…"> with its SVG (once).
@@ -62,8 +64,15 @@ function unb64u(str) {
 
 // Pull the variable fields out of a real localDescription SDP.
 function extract(sdp) {
-  const c = [...sdp.matchAll(/a=candidate:\S+ \d+ (udp) \d+ (\S+) (\d+) typ (host|srflx)/gi)]
+  let c = [...sdp.matchAll(/a=candidate:\S+ \d+ (udp) \d+ (\S+) (\d+) typ (host|srflx)/gi)]
     .map((m) => ({ addr: m[2], port: +m[3], type: m[4] }));
+  // Drop literal IPv6 candidates (address contains ':') as long as something
+  // else remains — on a shared LAN the IPv4/mDNS host candidate carries the
+  // connection, and IPv6 literals (link-local, srflx) are long and rarely the
+  // working path in the same room. mDNS "uuid.local" candidates hide their
+  // family and are kept regardless, so an IPv6-only network still works.
+  const v6 = (x) => x.addr.includes(":");
+  if (c.some((x) => !v6(x))) c = c.filter((x) => !v6(x));
   return {
     u: sdp.match(/a=ice-ufrag:(\S+)/)[1],
     p: sdp.match(/a=ice-pwd:(\S+)/)[1],
@@ -111,7 +120,22 @@ function unpack(b) {
   return { u, p, f, s, c, nonce };
 }
 
-function encode(desc) { return b64u(pack({ ...extract(desc.sdp), nonce: myNonce })); }
+// Raw packed bytes of our local description (with our nonce). The QR/link path
+// base64-encodes these; the audio path sends the raw bytes to skip that overhead.
+function packDesc(desc) { return pack({ ...extract(desc.sdp), nonce: myNonce }); }
+function encode(desc) { return b64u(packDesc(desc)); }
+// Prefix a 1-byte role marker ('o'/'a') so the audio receiver knows offer vs answer.
+const withType = (t, bytes) => { const a = new Uint8Array(bytes.length + 1); a[0] = t; a.set(bytes, 1); return a; };
+
+// Log what this device actually generated, so you can inspect candidates,
+// mDNS vs raw IPs, IPv6, and payload sizes.
+function logDesc(kind, desc) {
+  const cands = extract(desc.sdp).c.map((c) => `${c.type} ${c.addr}:${c.port}`);
+  console.log(`%c[share] ${kind}`, "font-weight:bold;color:#acff69",
+    `— code ${myCode.length} chars, audio ${myAudio.length} bytes, ${cands.length} candidate(s)`);
+  console.log("[share] candidates:", cands.length ? cands : "(none)");
+  console.log("[share] SDP:\n" + desc.sdp);
+}
 function decode(code) {
   const f = unpack(unb64u(code));
   return { type: f.s === "actpass" ? "offer" : "answer", sdp: build(f), nonce: f.nonce };
@@ -167,7 +191,7 @@ async function renderQr(box, url) {
   frame.appendChild(canvas);
   box.replaceChildren(frame);
   box.dataset.url = url;
-  box.classList.remove("hidden");
+  // Visibility is owned by applyPairUI (the QR is hidden in sound mode).
 }
 // ─────────── Live camera: runs continuously alongside the shown QR ───────────
 let scanStream = null, scanning = false;
@@ -182,8 +206,7 @@ async function startCamera(onScan) {
     await video.play();
   } catch {
     hide("pairCam");
-    document.querySelector(".fallback").open = true; // surface the link path
-    setStatus("Camera unavailable", "");
+    setStatus("Camera unavailable. Use a different method.", "err");
     return;
   }
   scanning = true;
@@ -286,6 +309,7 @@ function finalizeIncoming(inc) {
 function enterRoom() {
   if (entered) return; entered = true;
   stopCamera();
+  stopAudio();
   ["pair", "handoff"].forEach(hide);
   show("room");
   addSys("Connected. Say hi");
@@ -337,15 +361,30 @@ async function sendOne(file) {
 // the resulting answer. The whole thing is "point them at each other".
 let pc;
 let role = null;          // "offerer" | "answerer"
+let method = "camera";    // "camera" (QR) | "sound" — chosen up front; both devices must match
 let committed = false;    // decided to answer, or applied an answer, or connected
 let applied = false;      // an answer has been applied to our offer
 let myLink = null;        // our current QR/link URL
 let myCode = null;        // the code inside our own QR — ignored if the camera sees it (reflections/"mirror")
+let myAudio = null;       // raw bytes we transmit over audio: [type, ...packed], type 'o'/'a'
 let lastOfferCode = null; // offer we're answering (for regenerate on toggle)
 
 function setStatus(text, dot = "wait") { $("pairStatus").textContent = text; $("pairDot").className = "dot " + dot; }
 function flash(text) { setStatus(text); }
 function setStun(on) { useStun = on; localStorage.setItem("useStun", on ? "1" : "0"); }
+
+// Show the right pieces for the chosen method / role. Sound shows no QR/camera;
+// in camera mode only an offerer that hasn't yet committed scans (answerers just
+// display their QR for the other device to read).
+function applyPairUI() {
+  $("pair").dataset.method = method;
+  $("soundPanel").classList.toggle("hidden", method !== "sound");
+  $("linkPanel").classList.toggle("hidden", method !== "link");
+  $("pairIntro").classList.toggle("hidden", method !== "camera");
+  $("pairQr").classList.toggle("hidden", method !== "camera");
+  // Only an offerer still hunting scans; answerers just present their reply.
+  $("pairCam").classList.toggle("hidden", method !== "camera" || role !== "offerer" || committed);
+}
 
 // ─────────── Start screen + PWA install ───────────
 let deferredInstall = null;
@@ -361,7 +400,7 @@ window.addEventListener("appinstalled", () => { deferredInstall = null; hide("in
 
 function startStart() {
   show("start");
-  $("startBtn").onclick = () => { hide("start"); startOfferer(); };
+  $("startBtn").onclick = () => { hide("start"); startChoose(); };
   $("howLink").onclick = () => { hide("start"); show("how"); };
   $("howBack").onclick = () => { hide("how"); show("start"); };
   $("installBtn").onclick = async () => {
@@ -373,6 +412,27 @@ function startStart() {
   };
   // iOS Safari never fires beforeinstallprompt — offer manual instructions.
   if (/iphone|ipad|ipod/i.test(navigator.userAgent) && !isStandalone()) show("iosInstall");
+}
+
+// Pairing-method chooser — shown before any QR is rendered or sound is played,
+// and reachable again via "Use a different method".
+function startChoose() {
+  show("choose");
+  $("chooseCam").onclick = () => chooseMethod("camera");
+  $("chooseSound").onclick = () => chooseMethod("sound");
+  $("chooseLink").onclick = () => chooseMethod("link");
+  $("chooseBack").onclick = () => { hide("choose"); role ? show("pair") : show("start"); };
+}
+
+function chooseMethod(m) {
+  hide("choose");
+  if (!role) return startOfferer(m); // fresh visit: become the offerer with this method
+  // Already pairing: switch how we present the SAME code (keep role/offer/answer).
+  method = m;
+  stopCamera(); stopAudioUI();
+  show("pair");
+  applyPairUI();
+  if (m === "camera" && role === "offerer" && !committed) startCamera(onScan);
 }
 
 if ("serviceWorker" in navigator)
@@ -398,15 +458,63 @@ function wireFallback() {
     if (!parsed) return alert("Invalid code");
     onScan(parsed, true); // explicit paste — skip the nonce tiebreak
   };
+  $("switchMethod").onclick = () => { stopCamera(); stopAudioUI(); hide("pair"); startChoose(); };
+  wireAudio();
 }
 
-// ── OFFERER: show offer QR + run the camera ──
-async function startOfferer() {
-  role = "offerer";
+// ── Audio handshake (data-over-sound). Turn-based: play, then swap and listen. ──
+function setAudioStatus(text) { const el = $("audioStatus"); el.textContent = text; el.hidden = !text; }
+function audioBusy(on) { $("audioStop").classList.toggle("hidden", !on); }
+function setProgress(f) { // f in 0..1, or null to hide/reset
+  const bar = $("audioProgress");
+  bar.classList.toggle("hidden", f == null);
+  bar.querySelector("i").style.width = (f == null ? 0 : Math.round(f * 100)) + "%";
+}
+function stopAudioUI() { stopAudio(); audioBusy(false); setProgress(null); }
+function wireAudio() {
+  $("audioUltra").onchange = () => setUltrasound($("audioUltra").checked);
+  $("audioPlay").onclick = async () => {
+    stopAudioUI();
+    const loop = $("audioLoop").checked;
+    audioBusy(true);
+    setProgress(0);
+    setAudioStatus(loop ? "Playing your code on repeat. Press Stop when the other device has it."
+                        : "Playing your code once…");
+    try {
+      await playBytes(myAudio, {
+        loop,
+        onprogress: (f) => setProgress(f),
+        onended: () => { audioBusy(false); setProgress(null); setAudioStatus("Played. Press Play code to send it again."); },
+      });
+    } catch { setAudioStatus("Audio unavailable on this device."); audioBusy(false); setProgress(null); }
+  };
+  $("audioListen").onclick = async () => {
+    stopAudioUI();
+    audioBusy(true);
+    setAudioStatus("Listening for the other device…");
+    try {
+      await startListening((bytes) => {
+        // bytes = [type, ...packed]; rebuild the same {type, code} a scan/paste yields.
+        const type = bytes[0] === 0x6f ? "o" : bytes[0] === 0x61 ? "a" : null;
+        if (!type) return;
+        const code = b64u(bytes.subarray(1));
+        if (code === myCode) return; // ignore our own sound bouncing back
+        stopAudioUI();
+        setAudioStatus("Heard it! Connecting…");
+        onScan({ type, code }, true); // like a pasted code — skip the nonce tiebreak
+      });
+    } catch { setAudioStatus("Microphone unavailable."); audioBusy(false); }
+  };
+  $("audioStop").onclick = () => { stopAudioUI(); setAudioStatus(""); };
+}
+
+// ── OFFERER: mint our offer, then present it per the chosen method ──
+async function startOfferer(m) {
+  role = "offerer"; method = m || "camera";
   show("pair");
   wireFallback();
-  await mintOffer();
-  startCamera(onScan);
+  await mintOffer();          // builds the code + QR + myHash, then applyPairUI()
+  if (method === "camera") startCamera(onScan);
 }
 
 async function mintOffer() {
@@ -416,11 +524,13 @@ async function mintOffer() {
   setupChannel(pc.createDataChannel("data"));
   await pc.setLocalDescription(await pc.createOffer());
   await iceComplete(pc);
-  myCode = encode(pc.localDescription);
+  { const packed = packDesc(pc.localDescription); myCode = b64u(packed); myAudio = withType(0x6f, packed); } // 'o'
   myLink = linkFor("o", myCode);
+  logDesc("offer", pc.localDescription);
   $("pairLink").textContent = myLink;
   await renderQr($("pairQr"), myLink);
-  setStatus("Looking for the other device…");
+  applyPairUI();
+  setStatus(method === "sound" ? "Play your code, or listen for theirs." : "Looking for the other device…");
   // Same-browser link handoff (see startHandoff): answer arrives over BroadcastChannel.
   bc.onmessage = (e) => {
     if (e.data.type === "answer" && role === "offerer" && !applied) {
@@ -438,26 +548,25 @@ async function applyAnswer(sdp) {
 
 // ── ANSWERER: reached by yielding to a scanned offer, or via an #o= link ──
 async function startAnswerer(code) {
-  role = "answerer"; committed = true; lastOfferCode = code;
+  role = "answerer"; method = "camera"; committed = true; lastOfferCode = code;
   show("pair");
-  hide("pairCam"); // reached by scanning their offer — we only need to show OUR answer back
   $("pairIntro").innerHTML =
-    "You scanned their code. Now show <strong>this new code</strong> to the other " +
-    "device’s camera to finish connecting. It’s a different QR from the one you just scanned.";
+    "Almost there. Show <strong>this new code</strong> to the other device’s camera to " +
+    "finish connecting. If they sent you a link instead, use a different method to send this reply back.";
   wireFallback();
-  await buildAnswer(code);
+  await buildAnswer(code); // renders the answer QR + applyPairUI (hides the camera for an answerer)
 }
 
-// Turn a running offerer into the answerer for a scanned offer.
+// Turn a running offerer into the answerer for a scanned/heard offer (keeps the method).
 async function becomeAnswerer(code) {
   committed = true; role = "answerer"; lastOfferCode = code;
-  stopCamera();
+  stopCamera(); stopAudioUI();
   try { if (pc) pc.close(); } catch {}
   applied = false; entered = false; channel = null; bc.onmessage = null;
-  hide("pairCam");
-  $("pairIntro").innerHTML =
-    "Got their code. Now show <strong>this new code</strong> to the other " +
-    "device’s camera to finish connecting.";
+  if (method !== "sound")
+    $("pairIntro").innerHTML =
+      "Got their code. Now show <strong>this new code</strong> to the other " +
+      "device’s camera to finish connecting.";
   await buildAnswer(code);
 }
 
@@ -474,11 +583,13 @@ async function buildAnswer(code) {
     setStatus("Invalid or expired code", "err");
     return;
   }
-  myCode = encode(pc.localDescription);
+  { const packed = packDesc(pc.localDescription); myCode = b64u(packed); myAudio = withType(0x61, packed); } // 'a'
   myLink = linkFor("a", myCode);
+  logDesc("answer", pc.localDescription);
   $("pairLink").textContent = myLink;
   await renderQr($("pairQr"), myLink);
-  setStatus("Waiting for them to scan this…");
+  applyPairUI();
+  setStatus(method === "sound" ? "Now play your code so they can hear it." : "Waiting for them to scan this…");
 }
 
 // Every scanned/pasted code lands here. `manual` = pasted (skip tiebreak).

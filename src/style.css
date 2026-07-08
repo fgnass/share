@@ -120,8 +120,22 @@ button svg { width: 17px; height: 17px; }
 
 /* ── Start screen ── */
 #start .hero { display: block; width: 100%; max-width: 300px; height: auto; margin: 0.4rem auto 1.4rem; }
-#start .lead { color: var(--ink); font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem; }
+.lead { color: var(--ink); font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem; }
 #start #installBtn { margin-top: 10px; }
+
+/* ── Choose screen ── */
+#choose .row + button { margin-top: 10px; }
+#choose .hint { font-size: 0.78rem; color: var(--muted); line-height: 1.5; margin: 14px 0 18px; }
+
+/* Compact, secondary "Back" button (auto width, subtle) so it doesn't read as a
+   primary action stranded at the bottom. */
+button.back {
+  width: auto; align-self: flex-start; padding: 0.5em 0.9em;
+  font-size: 0.74rem; color: var(--muted); border-color: transparent;
+}
+button.back svg { width: 15px; height: 15px; }
+button.back:hover { color: var(--ink); border-color: var(--border); background: transparent; }
+#choose { display: flex; flex-direction: column; }
 
 /* ── Numbered steps (start + how) ── */
 .steps { list-style: none; display: flex; flex-direction: column; gap: 12px; margin: 0 0 1.6rem; }
@@ -139,6 +153,8 @@ button svg { width: 17px; height: 17px; }
 /* ── How it works screen ── */
 #how .how p { margin: 0 0 1rem; }
 #how .how p:last-child { margin-bottom: 0; }
+#how .how-methods { list-style: none; margin: -0.4rem 0 1rem; padding: 0; display: flex; flex-direction: column; gap: 0.55rem; }
+#how .how-methods li { color: var(--muted); font-size: 0.9rem; line-height: 1.5; padding-left: 0.9rem; border-left: 2px solid var(--border); }
 #how #howBack { margin-top: 1.6rem; }
 #start .foot {
   display: flex; align-items: center; justify-content: center; gap: 10px;
@@ -212,7 +228,21 @@ textarea:focus { outline: none; border-color: var(--accent); }
   .paircol { flex: 0 0 300px; margin-top: 0; min-height: 0; overflow-y: auto; }
   .paircol #pairIntro { margin-top: 0; }
   .paircol .scanview { margin: 0 0 4px; width: 100%; }            /* camera at top of the right column */
+
+  /* Sound / link modes have no QR/camera, so drop the wide two-column layout
+     and render as a normal narrow, centered card. */
+  #pair[data-method="sound"], #pair[data-method="link"] { width: 100%; max-width: 520px; }
+  #pair[data-method="sound"] .pairgrid, #pair[data-method="link"] .pairgrid { display: block; max-height: none; }
+  #pair[data-method="sound"] .paircol, #pair[data-method="link"] .paircol { display: block; overflow: visible; }
 }
+
+/* ── Sound / link panels ── */
+#soundPanel > p, #linkPanel > p { margin: 0 0 14px; color: var(--muted); font-size: 0.9rem; line-height: 1.5; }
+#soundPanel #audioStop { margin-top: 10px; }
+#soundPanel #audioStatus { margin-top: 12px; }
+#soundPanel .progress { height: 6px; background: rgba(255, 255, 255, 0.1); border-radius: 999px; overflow: hidden; margin-top: 12px; }
+#soundPanel .progress > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.08s linear; }
+#switchMethod { margin-top: 16px; }
 /* Mirror the preview so movement matches the user like a mirror; the QR decode
    reads the raw (un-mirrored) video frame, so scanning is unaffected. */
 .scanview video { width: 100%; height: 100%; object-fit: cover; display: block; transform: scaleX(-1); }

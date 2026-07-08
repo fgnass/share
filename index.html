@@ -72,12 +72,25 @@
     </details>
 
     <footer class="foot">
-      <a id="howLink" class="linklike">How it works</a>
+      <a id="howLink">How it works</a>
       <span class="dot-sep">·</span>
       <a id="ghLink" href="https://github.com/fgnass/share" target="_blank" rel="noopener"><span data-icon="github"></span>GitHub</a>
       <span class="dot-sep">·</span>
       <a href="https://github.com/fgnass/share/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
     </footer>
+  </section>
+
+  <!-- ── CHOOSE: how to pair (before any QR is shown or sound played) ── -->
+  <section id="choose" class="card hidden">
+    <p class="sub">Connect a device</p>
+    <p class="lead">Pick how to link the two devices. Choose the same on both.</p>
+    <div class="row">
+      <button id="chooseCam"><span data-icon="scan"></span>Scan QR</button>
+      <button id="chooseSound"><span data-icon="volume"></span>Sound</button>
+    </div>
+    <button id="chooseLink" class="ghost"><span data-icon="link"></span>Send a link</button>
+    <p class="hint">QR shows a code that each device's camera reads. Sound plays the code out loud as a short chirp that the other device hears through its microphone. A link works anywhere: send it over any chat and paste the reply back.</p>
+    <button id="chooseBack" class="ghost back"><span data-icon="back"></span>Back</button>
   </section>
 
   <!-- ── HOW IT WORKS ── -->
@@ -86,20 +99,24 @@
 
     <ol class="steps">
       <li><span>1</span>Open this page on both devices and tap Connect.</li>
-      <li><span>2</span>Point their cameras at each other's codes.</li>
+      <li><span>2</span>Pick the same pairing method on both: QR, sound, or a link.</li>
       <li><span>3</span>Chat and send files, straight between you.</li>
     </ol>
 
     <div class="how">
-      <p><b>Paired by QR.</b> Each device shows a QR code and reads the other's with its camera. That handshake is all it takes to link the two, no typing and no accounts.</p>
+      <p><b>Three ways to pair.</b> The two devices swap a short setup code to link up, and you choose how it travels:</p>
+      <ul class="how-methods">
+        <li><b>QR:</b> each device shows a code and reads the other's with its camera.</li>
+        <li><b>Sound:</b> one device plays the code out loud as a brief chirp; the other listens for it through its mic. Handy when there's no camera. Take turns so the reply can travel back.</li>
+        <li><b>Link:</b> send the code as a link over any chat, then paste the reply the other device sends back. Works between any two devices, anywhere.</li>
+      </ul>
       <p><b>Direct and private.</b> Messages and files travel straight between the two devices over an encrypted connection. Nothing is uploaded, stored, or seen by any server.</p>
       <p><b>Your network stays yours.</b> On the same Wi-Fi nothing external is contacted at all. To connect across different networks you can turn on a STUN server, which only helps the devices find each other; your data never passes through it.</p>
       <p><b>Just one file.</b> The whole app is a single static HTML file, no build step and no backend. Save it, host it anywhere, or read every line of its source.</p>
       <p><b>Works offline.</b> Save it to your home screen and it launches like an app even with no connection, since pairing itself needs no server.</p>
-      <p><b>No camera?</b> Share a link or paste a code instead.</p>
     </div>
 
-    <button id="howBack" class="ghost">Back</button>
+    <button id="howBack" class="ghost back"><span data-icon="back"></span>Back</button>
   </section>
 
   <!-- ── PAIR: big QR left, everything else (camera + copy) right ── -->
@@ -109,24 +126,40 @@
       <div class="paircol">
         <p id="pairIntro">Point the two devices at each other. This QR code is yours; the camera reads theirs. Data goes straight between the devices. Nothing is uploaded.</p>
         <div class="scanview" id="pairCam"><video id="pairVideo" playsinline muted></video><div class="scanframe"></div></div>
-        <div class="status"><span id="pairDot" class="dot wait"></span><span id="pairStatus">Looking for the other device…</span></div>
-        <label class="toggle"><input type="checkbox" id="stunToggle">
-          <span>Connect across networks<em>Off = same network only, no server contact. On uses a STUN server (reveals your public IP to it). Both devices must enable it.</em></span>
-        </label>
-        <details class="fallback">
-          <summary><span data-icon="link"></span>No camera? Share a link instead</summary>
-          <p style="margin-top:12px">Send this link to the other device (WhatsApp, Signal, mail) and keep this tab open until they join.</p>
+        <div id="soundPanel" class="hidden">
+          <p>Your device turns its pairing code into sound and plays it; the other device listens through its mic. Hold them close and take turns: one plays while the other listens, then swap so the reply travels back.</p>
+          <div class="row">
+            <button id="audioPlay"><span data-icon="volume"></span>Play code</button>
+            <button id="audioListen" class="ghost"><span data-icon="mic"></span>Listen</button>
+          </div>
+          <button id="audioStop" class="ghost hidden"><span data-icon="x"></span>Stop</button>
+          <div id="audioProgress" class="progress hidden"><i></i></div>
+          <label class="toggle"><input type="checkbox" id="audioLoop">
+            <span>Repeat until connected<em>Off = play once. On = keep replaying, which gets noisy fast.</em></span>
+          </label>
+          <label class="toggle"><input type="checkbox" id="audioUltra">
+            <span>Ultrasound<em>Near-silent, same speed. Some speakers and mics can't manage it, so try plain sound if it won't connect.</em></span>
+          </label>
+          <div id="audioStatus" class="link" hidden></div>
+        </div>
+        <div id="linkPanel" class="hidden">
+          <p>Send this link to the other device over any chat, and keep this tab open until they join.</p>
           <div class="row">
             <button id="shareLink" class="ghost"><span data-icon="share"></span>Share link</button>
             <button id="copyLink" class="ghost"><span data-icon="copy"></span>Copy</button>
           </div>
           <div id="pairLink" class="link"></div>
           <details style="margin-top:12px">
-            <summary>Got a code from the other device? Paste it</summary>
+            <summary>Got a code back from the other device? Paste it</summary>
             <textarea id="pasteCode" rows="3" placeholder="Link or code" style="margin-top:10px"></textarea>
             <button id="applyPaste" class="ghost" style="margin-top:8px">Apply</button>
           </details>
-        </details>
+        </div>
+        <div class="status"><span id="pairDot" class="dot wait"></span><span id="pairStatus">Looking for the other device…</span></div>
+        <label class="toggle"><input type="checkbox" id="stunToggle">
+          <span>Connect across networks<em>Off = same network only, no server contact. On uses a STUN server (reveals your public IP to it). Both devices must enable it.</em></span>
+        </label>
+        <button id="switchMethod" class="ghost"><span data-icon="switch"></span>Use a different method</button>
       </div>
     </div>
   </section>
