@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>share.gnass.buzz</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23acff69' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='18' cy='5' r='3'/><circle cx='6' cy='12' r='3'/><circle cx='18' cy='19' r='3'/><line x1='8.59' x2='15.42' y1='13.51' y2='17.49'/><line x1='15.41' x2='8.59' y1='6.51' y2='10.49'/></svg>">
+</head>
+<body>
+<main>
+  <!-- ── PAIR: your QR + live camera, both at once ── -->
+  <section id="pair" class="card hidden">
+    <h1>share<span>.gnass.buzz</span></h1>
+    <p class="sub">Peer to peer · no server</p>
+    <p id="pairIntro">Point the two devices at each other. The code below is yours; the camera reads theirs. Data goes straight between the devices — nothing is uploaded.</p>
+    <div id="pairQr" class="qr"></div>
+    <div class="scanview" id="pairCam"><video id="pairVideo" playsinline muted></video><div class="scanframe"></div></div>
+    <div class="status"><span id="pairDot" class="dot wait"></span><span id="pairStatus">Looking for the other device…</span></div>
+    <label class="toggle"><input type="checkbox" id="stunToggle">
+      <span>Connect across networks<em>Off = same network only, no server contact. On uses a STUN server (reveals your public IP to it). Both devices must enable it.</em></span>
+    </label>
+    <details class="fallback">
+      <summary><span data-icon="link"></span>No camera? Share a link instead</summary>
+      <p style="margin-top:12px">Send this link to the other device (WhatsApp, Signal, mail) and keep this tab open until they join.</p>
+      <div class="row">
+        <button id="shareLink" class="ghost"><span data-icon="share"></span>Share link</button>
+        <button id="copyLink" class="ghost"><span data-icon="copy"></span>Copy</button>
+      </div>
+      <div id="pairLink" class="link"></div>
+      <details style="margin-top:12px">
+        <summary>Got a code from the other device? Paste it</summary>
+        <textarea id="pasteCode" rows="3" placeholder="Link or code" style="margin-top:10px"></textarea>
+        <button id="applyPaste" class="ghost" style="margin-top:8px">Apply</button>
+      </details>
+    </details>
+  </section>
+
+  <!-- ── HANDOFF tab (#a=) ── -->
+  <section id="handoff" class="card hidden">
+    <h1>share<span>.gnass.buzz</span></h1>
+    <h2 id="handoffTitle" style="margin-top:14px">Connecting…</h2>
+    <p id="handoffText">Handing the answer to the other tab…</p>
+    <details id="handoffFallback" class="hidden">
+      <summary>Hand over manually</summary>
+      <p style="margin-top:10px">The original tab isn't responding. Copy this code and paste it there under "Paste answer manually":</p>
+      <textarea id="handoffBlob" rows="3" readonly></textarea>
+      <button id="copyHandoff" class="ghost" style="margin-top:8px">Copy code</button>
+    </details>
+  </section>
+
+  <!-- ── CHAT ROOM (both, after connection) ── -->
+  <section id="room" class="card hidden">
+    <div class="roomhead"><span id="roomDot" class="dot ok"></span><span id="roomStatus">Connected</span></div>
+    <div id="log"></div>
+    <div class="composer">
+      <button id="attach" class="iconbtn ghost" title="Send file"><span data-icon="paperclip"></span></button>
+      <input id="file" type="file" multiple hidden>
+      <textarea id="input" rows="1" placeholder="Message…"></textarea>
+      <button id="send" class="iconbtn" title="Send"><span data-icon="send"></span></button>
+    </div>
+  </section>
+</main>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
