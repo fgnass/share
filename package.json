@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "license": "MIT",
+  "homepage": "https://github.com/fgnass/share",
+  "repository": { "type": "git", "url": "https://github.com/fgnass/share.git" },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

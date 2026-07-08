@@ -8,11 +8,20 @@ server is opt-in for connecting across networks.
 
 ## How it works
 
+- **Start screen:** a short intro explains the flow; "Connect a device" opens the
+  pairing screen. Scanned/hand-off links skip straight past it.
 - **Pair:** one screen shows a QR and runs the camera at the same time — no mode
   switch. The devices auto-detect each other's codes and connect.
 - **No camera:** share a link or paste a code instead.
 - **SDP compaction:** only the variable WebRTC fields are shipped (packed to
   ~130 bytes) and a full SDP is rebuilt from a template, keeping the QR/link small.
+- **Installable (PWA):** a manifest + service worker make it installable to the
+  home screen and usable offline (pairing is peer-to-peer, so no server is needed
+  once loaded).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Develop
 

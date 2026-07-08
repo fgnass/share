@@ -1,12 +1,12 @@
 import QRCode from "qrcode";
 import jsQR from "jsqr";
-import { createElement, Paperclip, Send, FileText, Download, QrCode, ScanLine, X, Share2, Copy, Link2 } from "lucide";
+import { createElement, Paperclip, Send, FileText, Download, QrCode, ScanLine, X, Share2, Copy, Link2, Github } from "lucide";
 import "./style.css";
 
 // ─────────── Lucide icons ───────────
 const ICONS = {
   paperclip: Paperclip, send: Send, file: FileText, download: Download,
-  "qr-code": QrCode, scan: ScanLine, x: X, share: Share2, copy: Copy, link: Link2,
+  "qr-code": QrCode, scan: ScanLine, x: X, share: Share2, copy: Copy, link: Link2, github: Github,
 };
 function icon(name) { return createElement(ICONS[name]); }
 // Replace every <span data-icon="…"> with its SVG (once).
@@ -252,7 +252,14 @@ function setupChannel(ch) {
   ch.binaryType = "arraybuffer";
   let inc = null; // in-flight incoming file transfer
   ch.onopen = enterRoom;
-  ch.onclose = () => { $("roomDot").className = "dot err"; $("roomStatus").textContent = "Disconnected"; };
+  ch.onclose = () => {
+    $("roomDot").className = "dot err";
+    $("roomStatus").textContent = "Connection lost";
+    // A closed data channel can't be revived — reconnecting means a fresh pairing.
+    const btn = $("reconnect");
+    btn.classList.remove("hidden");
+    btn.onclick = () => location.replace(location.origin + location.pathname);
+  };
   ch.onmessage = (e) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data);
@@ -279,7 +286,7 @@ function enterRoom() {
   stopCamera();
   ["pair", "handoff"].forEach(hide);
   show("room");
-  addSys("Connected — say hi");
+  addSys("Connected. Say hi");
   const input = $("input"), fileEl = $("file");
   const grow = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 120) + "px"; };
   input.addEventListener("input", grow);
@@ -337,10 +344,42 @@ function setStatus(text, dot = "wait") { $("pairStatus").textContent = text; $("
 function flash(text) { setStatus(text); }
 function setStun(on) { useStun = on; localStorage.setItem("useStun", on ? "1" : "0"); }
 
+// ─────────── Start screen + PWA install ───────────
+let deferredInstall = null;
+const isStandalone = () =>
+  matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();          // keep our own button in charge of when to prompt
+  deferredInstall = e;
+  if (!isStandalone()) show("installBtn");
+});
+window.addEventListener("appinstalled", () => { deferredInstall = null; hide("installBtn"); });
+
+function startStart() {
+  show("start");
+  $("startBtn").onclick = () => { hide("start"); startOfferer(); };
+  $("howLink").onclick = () => { hide("start"); show("how"); };
+  $("howBack").onclick = () => { hide("how"); show("start"); };
+  $("installBtn").onclick = async () => {
+    if (!deferredInstall) return;
+    deferredInstall.prompt();
+    await deferredInstall.userChoice.catch(() => {});
+    deferredInstall = null;
+    hide("installBtn");
+  };
+  // iOS Safari never fires beforeinstallprompt — offer manual instructions.
+  if (/iphone|ipad|ipod/i.test(navigator.userAgent) && !isStandalone()) show("iosInstall");
+}
+
+if ("serviceWorker" in navigator)
+  window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
+
+// ─────────── Route by URL hash ───────────
 const hash = new URLSearchParams(location.hash.slice(1));
-if (hash.has("o")) startAnswerer(hash.get("o"));
-else if (hash.has("a")) startHandoff(hash.get("a"));
-else startOfferer();
+if (hash.has("o")) startAnswerer(hash.get("o"));       // scanned their offer → show our answer
+else if (hash.has("a")) startHandoff(hash.get("a"));   // same-browser answer hand-off
+else startStart();                                     // fresh visit → intro screen
 
 function wireFallback() {
   $("stunToggle").checked = useStun;
@@ -397,7 +436,10 @@ async function applyAnswer(sdp) {
 async function startAnswerer(code) {
   role = "answerer"; committed = true; lastOfferCode = code;
   show("pair");
-  $("pairIntro").textContent = "Show this code to the other device to finish connecting.";
+  hide("pairCam"); // reached by scanning their offer — we only need to show OUR answer back
+  $("pairIntro").innerHTML =
+    "You scanned their code. Now show <strong>this new code</strong> to the other " +
+    "device’s camera to finish connecting. It’s a different QR from the one you just scanned.";
   wireFallback();
   await buildAnswer(code);
 }
@@ -409,7 +451,9 @@ async function becomeAnswerer(code) {
   try { if (pc) pc.close(); } catch {}
   applied = false; entered = false; channel = null; bc.onmessage = null;
   hide("pairCam");
-  $("pairIntro").textContent = "Show this code to the other device to finish connecting.";
+  $("pairIntro").innerHTML =
+    "Got their code. Now show <strong>this new code</strong> to the other " +
+    "device’s camera to finish connecting.";
   await buildAnswer(code);
 }
 
@@ -445,7 +489,7 @@ function onScan(parsed, manual = false) {
   if (manual) return becomeAnswerer(parsed.code);
   if (dec.nonce === myNonce) { myNonce = (myNonce + 1) & 0xffff; mintOffer(); return; } // tie → reroll
   if (myNonce < dec.nonce) becomeAnswerer(parsed.code);
-  else flash("Saw their code — now point their camera at yours");
+  else flash("Saw their code. Now point their camera at yours");
 }
 
 // ── HANDOFF tab (#a=): push the answer to the original tab (same browser) ──
@@ -457,7 +501,7 @@ async function startHandoff(code) {
     if (e.data.type === "ack") {
       acked = true;
       $("handoffTitle").textContent = "Connected";
-      $("handoffText").textContent = "All done — you can close this tab and continue in the other one.";
+      $("handoffText").textContent = "All done. You can close this tab and continue in the other one.";
     }
   };
   bc.postMessage({ type: "answer", sdp });

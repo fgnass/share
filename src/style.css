@@ -112,6 +112,41 @@ button svg { width: 17px; height: 17px; }
 .row { display: flex; gap: 8px; }
 .row button { flex: 1; }
 
+/* ── Start screen ── */
+#start .hero { display: block; width: 100%; max-width: 300px; height: auto; margin: 0.4rem auto 1.4rem; }
+#start .lead { color: var(--ink); font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem; }
+#start #installBtn { margin-top: 10px; }
+
+/* ── Numbered steps (start + how) ── */
+.steps { list-style: none; display: flex; flex-direction: column; gap: 12px; margin: 0 0 1.6rem; }
+.steps li {
+  display: flex; align-items: flex-start; gap: 12px;
+  color: var(--ink); font-size: 0.9rem; line-height: 1.4;
+}
+.steps li span {
+  flex: 0 0 auto; width: 24px; height: 24px; border-radius: 999px;
+  background: var(--accent); color: var(--accent-ink);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.78rem; font-weight: 800;
+}
+
+/* ── How it works screen ── */
+#how .how p { margin: 0 0 1rem; }
+#how .how p:last-child { margin-bottom: 0; }
+#how #howBack { margin-top: 1.6rem; }
+#start .foot {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+#start .foot a {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--muted); text-decoration: none; font-weight: 600; cursor: pointer;
+}
+#start .foot a:hover { color: var(--ink); }
+#start .foot svg { width: 15px; height: 15px; }
+#start .foot .dot-sep { color: var(--border); }
+
 /* ── Inputs ── */
 textarea {
   width: 100%;
@@ -142,7 +177,9 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .qr-frame { background: #fff; padding: 14px; border-radius: 16px; line-height: 0; }
 .qr-frame canvas { display: block; width: 216px; height: 216px; }
 .scanview { position: relative; margin: 16px auto 0; width: 216px; max-width: 100%; border-radius: 18px; overflow: hidden; background: #000; aspect-ratio: 1; }
-.scanview video { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Mirror the preview so movement matches the user like a mirror; the QR decode
+   reads the raw (un-mirrored) video frame, so scanning is unaffected. */
+.scanview video { width: 100%; height: 100%; object-fit: cover; display: block; transform: scaleX(-1); }
 /* Corner brackets over the viewfinder. */
 .scanframe { position: absolute; inset: 14px; border-radius: 10px;
   background:
@@ -185,6 +222,7 @@ a { color: var(--accent); }
   border-bottom: 1px solid var(--border);
   font-size: 0.72rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted);
 }
+.roomhead #reconnect { margin-left: auto; padding: 6px 12px; font-size: 0.72rem; letter-spacing: 0.08em; }
 #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 9px; }
 .msg {
   max-width: 82%; padding: 9px 13px; border-radius: 16px; font-size: 0.9rem; line-height: 1.45;
