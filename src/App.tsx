@@ -73,12 +73,12 @@ function How() {
         <p><b>Three ways to pair.</b> The two devices swap a short setup code to link up, and you choose how it travels:</p>
         <ul class="how-methods">
           <li><b>QR:</b> each device shows a code and reads the other's with its camera.</li>
-          <li><b>Sound:</b> one device plays the code as a short tune (soft musical notes, not a harsh chirp); the other listens through its mic. Handy when there's no camera. Take turns so the reply can travel back.</li>
+          <li><b>Sound:</b> tap Pair on both devices and hold them close. They chirp soft musical notes back and forth (not a harsh chirp) and listen through the mic, taking turns on their own until they're linked. A device on its own never transmits its code, so nothing gets sent into an empty room.</li>
           <li><b>Link:</b> send the code as a link over any chat, then paste the reply the other device sends back. Works between any two devices, anywhere.</li>
         </ul>
         <p><b>Direct and private.</b> Messages and files travel straight between the two devices over an encrypted connection. Nothing is uploaded, stored, or seen by any server.</p>
         <p><b>Your network stays yours.</b> On the same Wi-Fi nothing external is contacted at all. To connect across different networks you can turn on a STUN server, which only helps the devices find each other; your data never passes through it.</p>
-        <p><b>Just one file.</b> The whole app is a single static HTML file, no build step and no backend. Save it, host it anywhere, or read every line of its source.</p>
+        <p><b>Open source.</b> The whole app is a small static site with no backend, built from plain Preact and TypeScript. Host it anywhere, or read every line of its source.</p>
         <p><b>Works offline.</b> Save it to your home screen and it launches like an app even with no connection, since pairing itself needs no server.</p>
       </div>
       <button class="ghost back" onClick={() => (S.screen.value = "start")}><Icon name="back" />Back</button>

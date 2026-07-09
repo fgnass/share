@@ -1,6 +1,6 @@
-// Minimal offline cache. The whole app is a single self-contained index.html
-// (JS/CSS/font all inlined), so caching the shell is enough to run offline —
-// pairing itself is peer-to-peer and needs no server anyway.
+// Minimal offline cache. We precache the shell and then cache every same-origin
+// GET as it's fetched (the hashed JS/CSS/font assets), so after the first load a
+// reload works offline — pairing itself is peer-to-peer and needs no server.
 const CACHE = "share-v1";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-512.png", "./icon-192.png"];
 
