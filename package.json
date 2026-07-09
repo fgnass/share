@@ -15,12 +15,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "ggwave": "^0.4.0",
+    "@preact/signals": "^2.9.3",
     "jsqr": "^1.4.0",
     "lucide": "^0.544.0",
+    "preact": "^10.29.7",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "@preact/preset-vite": "^2.10.5",
+    "typescript": "^7.0.2",
     "vite": "^6.0.0",
     "vite-plugin-singlefile": "^2.3.3"
   }
