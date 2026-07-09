@@ -80,13 +80,38 @@ export function registerVideo(el: HTMLVideoElement | null) {
   else if (!el) stopCamera();
 }
 
+// ── Live connection health ──
+// A datachannel's onclose does NOT fire reliably when a mobile tab is suspended
+// (backgrounded to install an APK, switch apps, lock the screen…), so the UI
+// could sit on "Connected" while nothing actually gets through. We watch the
+// peer connection's own state changes and also re-check on return to foreground.
+let connGrace: ReturnType<typeof setTimeout> | null = null;
+function clearGrace() { if (connGrace) { clearTimeout(connGrace); connGrace = null; } }
+function setRoom(text: string, ok: boolean, showReconnect: boolean) { S.roomStatus.value = { text, ok, showReconnect }; }
+function markLost() { clearGrace(); setRoom("Connection lost", false, true); }
+// connectionState is authoritative; fall back to iceConnectionState on browsers
+// that lack it (older Safari), where "completed" also counts as connected.
+function connState(): string { return pc ? ((pc.connectionState as string) || pc.iceConnectionState) : "closed"; }
+function reflectConn() {
+  if (!entered || !pc) return;
+  const st = connState();
+  if (st === "connected" || st === "completed") { clearGrace(); setRoom("Connected", true, false); }
+  else if (st === "failed" || st === "closed") markLost();
+  else if (st === "disconnected") {
+    setRoom("Connection unstable", false, true);  // may be a blip; give it a moment, but let the user bail now
+    if (!connGrace) connGrace = setTimeout(() => { connGrace = null; if (connState() !== "connected" && connState() !== "completed") markLost(); }, 6000);
+  }
+}
+function wireConn(p: RTCPeerConnection) { p.onconnectionstatechange = reflectConn; p.oniceconnectionstatechange = reflectConn; }
+
 // ── DataChannel: chat + files ──
 function setupChannel(ch: RTCDataChannel) {
   channel = ch;
   ch.binaryType = "arraybuffer";
   let inc: { name: string; size: number; mime: string; chunks: ArrayBuffer[]; got: number; id: number } | null = null;
   ch.onopen = enterRoom;
-  ch.onclose = () => { S.roomStatus.value = { text: "Connection lost", ok: false, showReconnect: true }; };
+  ch.onclose = markLost;
+  ch.onerror = markLost;
   ch.onmessage = (e) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data);
@@ -113,22 +138,25 @@ function finalize(inc: { chunks: ArrayBuffer[]; mime: string; id: number; name: 
 function enterRoom() {
   if (entered) return; entered = true;
   autoRunning = false; stopCamera(); stopAudio();
+  clearGrace(); setRoom("Connected", true, false);
   S.screen.value = "room";
   S.pushMsg({ id: S.nextId(), kind: "sys", text: "Connected. Say hi" });
 }
 
 export function sendMessage(text: string) {
   const t = text.trim();
-  if (!t || !channel || channel.readyState !== "open") return false;
-  channel.send(JSON.stringify({ k: "chat", t }));
+  if (!t) return false;
+  if (!channel || channel.readyState !== "open") { markLost(); return false; }
+  try { channel.send(JSON.stringify({ k: "chat", t })); }
+  catch { markLost(); return false; }
   S.pushMsg({ id: S.nextId(), kind: "chat", mine: true, text: t });
   return true;
 }
 export function sendFiles(files: File[]) {
-  for (const f of files) sendQ = sendQ.then(() => sendOne(f)).catch(console.error);
+  for (const f of files) sendQ = sendQ.then(() => sendOne(f)).catch((e) => { console.error(e); markLost(); });
 }
 async function sendOne(file: File) {
-  if (!channel || channel.readyState !== "open") return;
+  if (!channel || channel.readyState !== "open") { markLost(); return; }
   const id = S.nextId();
   S.pushMsg({ id, kind: "file", mine: true, name: file.name, size: file.size, progress: 0, done: false });
   channel.send(JSON.stringify({ k: "file", n: file.name, s: file.size, m: file.type }));
@@ -165,6 +193,7 @@ async function mintOffer() {
   try { pc?.close(); } catch {}
   applied = false; entered = false; channel = null;
   pc = new RTCPeerConnection(rtcConfig());
+  wireConn(pc);
   setupChannel(pc.createDataChannel("data"));
   await pc.setLocalDescription(await pc.createOffer());
   await iceComplete(pc);
@@ -209,6 +238,7 @@ async function buildAnswer(code: string) {
   try { pc?.close(); } catch {}
   entered = false; channel = null;
   pc = new RTCPeerConnection(rtcConfig());
+  wireConn(pc);
   pc.ondatachannel = (e) => setupChannel(e.channel);
   try {
     await pc.setRemoteDescription(decode(code) as any);
@@ -357,6 +387,9 @@ export async function soundAuto() {
 
 // ── Init: route by URL hash ──
 export function initRouting() {
+  // Re-check the live connection whenever the tab comes back to the foreground:
+  // a suspended mobile tab often drops the connection without firing any event.
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) reflectConn(); });
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.has("o")) startAnswerer(hash.get("o")!);
   else if (hash.has("a")) startHandoff(hash.get("a")!);
