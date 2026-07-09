@@ -1,6 +1,6 @@
 import { signal } from "@preact/signals";
 
-export type Screen = "start" | "choose" | "how" | "pair" | "handoff" | "room";
+export type Screen = "choose" | "how" | "pair" | "handoff" | "room";
 export type Method = "camera" | "sound" | "link";
 export type BandMode = "auto" | "audible" | "ultrasound";
 
@@ -9,7 +9,7 @@ export type Msg =
   | { id: number; kind: "chat"; mine: boolean; text: string }
   | { id: number; kind: "file"; mine: boolean; name: string; size: number; progress: number; url?: string; file?: File; done: boolean };
 
-export const screen = signal<Screen>("start");
+export const screen = signal<Screen>("choose");
 export const method = signal<Method>("camera");
 
 // Pair screen

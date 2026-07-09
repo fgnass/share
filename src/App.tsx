@@ -2,13 +2,12 @@ import { useEffect, useRef } from "preact/hooks";
 import * as S from "./state";
 import * as P from "./pairing";
 import { install } from "./pwa";
-import { Icon, Qr, Hero, fmt } from "./ui";
+import { Icon, Qr, fmt } from "./ui";
 
 export function App() {
   const s = S.screen.value;
   return (
     <main>
-      {s === "start" && <Start />}
       {s === "choose" && <Choose />}
       {s === "how" && <How />}
       {s === "pair" && <Pair />}
@@ -18,12 +17,17 @@ export function App() {
   );
 }
 
-function Start() {
+function Choose() {
   return (
-    <section id="start" class="card">
-      <Hero />
+    <section id="choose" class="card">
+      <p class="sub">Connect a device</p>
       <p class="lead">Send messages and files straight between two devices. No account, no server, nothing uploaded.</p>
-      <button id="startBtn" onClick={() => (S.screen.value = "choose")}><Icon name="scan" />Connect a device</button>
+      <div class="row">
+        <button onClick={() => P.chooseMethod("camera")}><Icon name="scan" />Scan QR</button>
+        <button onClick={() => P.chooseMethod("sound")}><Icon name="volume" />Sound</button>
+      </div>
+      <button class="ghost" onClick={() => P.chooseMethod("link")}><Icon name="link" />Send a link</button>
+      <p class="hint">Pick the same method on both devices. QR shows a code that each device's camera reads. Sound plays the code as a short tune the other device hears through its mic. A link works anywhere: send it over any chat and paste the reply back.</p>
       {S.canInstall.value && (
         <button id="installBtn" class="ghost" onClick={install}><Icon name="download" />Save for offline use</button>
       )}
@@ -33,6 +37,7 @@ function Start() {
           <p style="margin-top:12px">Tap the <b>Share</b> button in Safari, then choose <b>Add to Home Screen</b>.</p>
         </details>
       )}
+      {P.inPairing() && <button class="ghost back" onClick={P.chooseBack}><Icon name="back" />Back</button>}
       <footer class="foot">
         <a onClick={() => (S.screen.value = "how")}>How it works</a>
         <span class="dot-sep">·</span>
@@ -40,22 +45,6 @@ function Start() {
         <span class="dot-sep">·</span>
         <a href="https://github.com/fgnass/share/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
       </footer>
-    </section>
-  );
-}
-
-function Choose() {
-  return (
-    <section id="choose" class="card">
-      <p class="sub">Connect a device</p>
-      <p class="lead">Pick how to link the two devices. Choose the same on both.</p>
-      <div class="row">
-        <button onClick={() => P.chooseMethod("camera")}><Icon name="scan" />Scan QR</button>
-        <button onClick={() => P.chooseMethod("sound")}><Icon name="volume" />Sound</button>
-      </div>
-      <button class="ghost" onClick={() => P.chooseMethod("link")}><Icon name="link" />Send a link</button>
-      <p class="hint">QR shows a code that each device's camera reads. Sound plays the code as a short tune the other device hears through its mic. A link works anywhere: send it over any chat and paste the reply back.</p>
-      <button class="ghost back" onClick={P.chooseBack}><Icon name="back" />Back</button>
     </section>
   );
 }
@@ -81,7 +70,7 @@ function How() {
         <p><b>Open source.</b> The whole app is a small static site with no backend, built from plain Preact and TypeScript. Host it anywhere, or read every line of its source.</p>
         <p><b>Works offline.</b> Save it to your home screen and it launches like an app even with no connection, since pairing itself needs no server.</p>
       </div>
-      <button class="ghost back" onClick={() => (S.screen.value = "start")}><Icon name="back" />Back</button>
+      <button class="ghost back" onClick={() => (S.screen.value = "choose")}><Icon name="back" />Back</button>
     </section>
   );
 }

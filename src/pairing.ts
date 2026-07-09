@@ -319,7 +319,10 @@ export function chooseMethod(m: S.Method) {
   if (m === "camera" && role === "offerer" && !committed) S.camOn.value = true; // component (re)starts scanning
   else S.qrUrl.value = method() === "camera" ? S.myLink.value : "";
 }
-export const chooseBack = () => (S.screen.value = role ? "pair" : "start");
+// The chooser is the landing screen; "Back" only exists when we reached it from
+// an in-progress pairing (via "Use a different method"), and returns there.
+export const inPairing = () => role !== null;
+export const chooseBack = () => (S.screen.value = "pair");
 export function switchMethod() { stopCamera(); stopSoundAuto(); S.screen.value = "choose"; }
 
 export function applyPaste(text: string) {
@@ -407,5 +410,5 @@ export function initRouting() {
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.has("o")) startAnswerer(hash.get("o")!);
   else if (hash.has("a")) startHandoff(hash.get("a")!);
-  else S.screen.value = "start";
+  else S.screen.value = "choose";
 }
