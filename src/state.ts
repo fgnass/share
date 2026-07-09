@@ -7,7 +7,7 @@ export type BandMode = "auto" | "audible" | "ultrasound";
 export type Msg =
   | { id: number; kind: "sys"; text: string }
   | { id: number; kind: "chat"; mine: boolean; text: string }
-  | { id: number; kind: "file"; mine: boolean; name: string; size: number; progress: number; url?: string; done: boolean };
+  | { id: number; kind: "file"; mine: boolean; name: string; size: number; progress: number; url?: string; file?: File; done: boolean };
 
 export const screen = signal<Screen>("start");
 export const method = signal<Method>("camera");

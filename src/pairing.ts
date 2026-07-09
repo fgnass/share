@@ -130,9 +130,23 @@ function setupChannel(ch: RTCDataChannel) {
     if (inc.got >= inc.size) { finalize(inc); inc = null; }
   };
 }
+// Some senders report no (or a generic) MIME type; fill it in from the file
+// extension so Android's download manager offers the right handler — e.g. tapping
+// a received .apk's notification opens the package installer instead of nothing.
+const EXT_MIME: Record<string, string> = {
+  apk: "application/vnd.android.package-archive",
+  pdf: "application/pdf", zip: "application/zip",
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  mp4: "video/mp4", mp3: "audio/mpeg", txt: "text/plain",
+};
+function resolveMime(name: string, given: string): string {
+  if (given && given !== "application/octet-stream") return given;
+  const ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+  return EXT_MIME[ext] || given || "application/octet-stream";
+}
 function finalize(inc: { chunks: ArrayBuffer[]; mime: string; id: number; name: string }) {
-  const blob = new Blob(inc.chunks, { type: inc.mime || "application/octet-stream" });
-  S.updateMsg(inc.id, { done: true, url: URL.createObjectURL(blob), progress: 100 });
+  const file = new File(inc.chunks, inc.name, { type: resolveMime(inc.name, inc.mime) });
+  S.updateMsg(inc.id, { done: true, url: URL.createObjectURL(file), file, progress: 100 });
 }
 
 function enterRoom() {
