@@ -230,8 +230,12 @@ function Room() {
   );
 }
 
-const canShareFile = (f: File) =>
-  typeof navigator.share === "function" && !!navigator.canShare && navigator.canShare({ files: [f] });
+// The Web Share API (with file support). Only when it exists do we offer "Open".
+const HAS_FILE_SHARE = typeof navigator.share === "function" && typeof navigator.canShare === "function";
+function canShareFile(f: File) {
+  if (!HAS_FILE_SHARE) return false;
+  try { return navigator.canShare({ files: [f] }); } catch { return false; }
+}
 async function shareFile(f: File) { try { await navigator.share({ files: [f] }); } catch { /* cancelled */ } }
 
 function Bubble({ m }: { m: S.Msg }) {
