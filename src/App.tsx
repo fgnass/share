@@ -377,7 +377,7 @@ function DebugPanel() {
         <div class="dbgtest">
           {st.bands.map((b: any) => (
             <div class="tband">
-              <span class={"tname " + (b.ok ? "ok" : "bad")}>{b.name} · {b.good}/16 · mk {b.markerSnr.toFixed(0)}dB</span>
+              <span class={"tname " + (b.ok ? "ok" : "bad")}>{b.name} · {b.good}/{b.noteSnr.length} · med {b.markerSnr.toFixed(0)}dB</span>
               <div class="tcells">
                 {b.noteSnr.map((s: number) => <i class={s >= 10 ? "g" : "b"} style={`height:${Math.max(6, Math.min(100, s * 3))}%`} title={s.toFixed(1) + "dB"} />)}
               </div>

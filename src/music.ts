@@ -18,35 +18,30 @@ import { rsEncode, rsDecode } from "./rs";
 const TONE_MS = 36, GAP_MS = 6, CHIRP_MS = 80, SYNC_GAP_MS = 40, DET_MS = 28;
 
 const midiHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
-// Audible band: 16 notes of C major pentatonic (C D E G A) from C5 up — a bright
-// music-box register, sparkly, consecutive notes never clash, and the wide
-// spacing is easy to resolve. Marker C#8 (outside the scale). A C3 bass drone
-// (below) adds the low end back. Change 72 -> 60 for a warmer/lower voice.
-const PENT = [0, 2, 4, 7, 9];
-const AUD_NOTES = Array.from({ length: 16 }, (_, i) => midiHz(72 + 12 * Math.floor(i / 5) + PENT[i % 5]));
-const AUD_MARKER = midiHz(109);
-// Ultrasound band: 16 tones 15.6–18.0 kHz, marker just below. Kept ≤18 kHz on
-// purpose — most laptop/phone speakers and MEMS mics roll off steeply above
-// ~18 kHz, and at a 44.1 kHz context 20 kHz sits right under Nyquist where the
-// anti-alias filter eats it. ggwave's ultrasonic band started at 15 kHz and
-// worked; the previous 17.6–20 kHz plan here did not. Near-silent to most
-// adults; the self-test + audible fallback cover devices that still can't manage
-// it. No 2nd harmonic (it would alias into the audible range). These frequencies
-// are FIXED: two devices must agree on them, so the self-test only chooses WHICH
-// band to use, never invents per-device frequencies.
-const US_NOTES = Array.from({ length: 16 }, (_, i) => 15600 + i * 160);
-const US_MARKER = 15400;
+// Multi-tone MFSK (ggwave-style). Each band splits a frequency range into
+// `groups` blocks of 16 bins spaced `df` Hz apart. Every symbol lights up ONE
+// tone per group simultaneously → `groups` nibbles (groups/2 bytes) per symbol,
+// several × the throughput of one-tone-per-symbol. A dead bin then costs only one
+// nibble per symbol (Reed-Solomon repairs it) instead of a whole run — which is
+// what made the single-tone version's long frames never arrive.
+//
+// Audible has SNR headroom for more parallel tones over a wide range. Ultrasound
+// is kept ≤18 kHz (speakers/mics roll off above that, and 20 kHz sits under
+// Nyquist at 44.1 kHz) so it uses fewer, louder, more closely spaced tones.
+// Frequencies are FIXED: both devices must agree, so the self-test only chooses
+// WHICH band to use, never invents per-device frequencies.
+const GROUP_BINS = 16;
 const BANDS = {
-  // detMs: how much of each note to integrate when decoding. Audible notes are
-  // plucked (they decay), so detect on the loud attack; ultrasound is held, so
-  // use the full note for max energy/resolution.
-  // chirp: [f0,f1] of the sync sweep (see buildChirp). The two bands sweep
-  // disjoint ranges so a matched filter also tells the receiver which band it is.
-  // chirp sweep BW is kept moderate (~1.2–1.6 kHz): a wider sweep compresses to
-  // a peak narrower than the coarse scan hop and gets stepped over.
-  audible: { name: "audible", notes: AUD_NOTES, marker: AUD_MARKER, harm: 0.15, detMs: DET_MS, chirp: [2100, 3300] },
-  ultrasound: { name: "ultrasound", notes: US_NOTES, marker: US_MARKER, harm: 0, detMs: TONE_MS, chirp: [15700, 17300] },
+  // detMs: integration window when decoding. chirp: [f0,f1] of the sync sweep
+  // (buildChirp); the two bands sweep disjoint ranges so the matched filter also
+  // tells the receiver which band it is.
+  audible:    { name: "audible",    f0: 800,   df: 100, groups: 4, harm: 0.15, detMs: DET_MS,  pluck: true,  chirp: [2100, 3300] },
+  ultrasound: { name: "ultrasound", f0: 15000, df: 60,  groups: 3, harm: 0,    detMs: TONE_MS, pluck: false, chirp: [15700, 17300] },
 };
+// Frequency of bin `bin` (0..15) in group `g` (0..groups-1) of band B.
+const freqOf = (B, g: number, bin: number) => B.f0 + (g * GROUP_BINS + bin) * B.df;
+// All bin frequencies of a band, group-major (used for probing/monitoring).
+const binFreqs = (B) => { const o: number[] = []; for (let g = 0; g < B.groups; g++) for (let b = 0; b < GROUP_BINS; b++) o.push(freqOf(B, g, b)); return o; };
 // Which band we TRANSMIT in. The receiver auto-detects, so this need not match
 // the other device.
 let txMode = "audible";
@@ -155,16 +150,21 @@ export function encodeWaveform(payload, sr, mode = txMode, withIntro = true) {
   const toneN = Math.round(TONE_MS / 1000 * sr), symN = toneN + Math.round(GAP_MS / 1000 * sr);
   const chirpN = Math.round(CHIRP_MS / 1000 * sr), sgN = Math.round(SYNC_GAP_MS / 1000 * sr);
   const nibs = frameNibbles(payload);
+  const G = B.groups, nSym = Math.ceil(nibs.length / G);
   const riffN = (audible && withIntro) ? riffSamples(sr) + Math.round(sr * 0.12) : 0; // riff + a short gap before the chirp
   const dataStart = riffN + chirpN + sgN;
-  const data = new Float32Array(dataStart + nibs.length * symN + Math.round(sr * 0.05));
+  const data = new Float32Array(dataStart + nSym * symN + Math.round(sr * 0.05));
   if (audible) renderRiff(data, 0, sr);                             // cosmetic Mario intro
   data.set(buildChirp(B, sr, audible ? 0.5 : 0.6), riffN);        // sync preamble (frequency sweep), region is silent
-  // Data notes are plucky sine (robust: square's harmonics collide with other
-  // note bins and can flip a symbol). The chiptune character lives in the intro.
-  for (let s = 0; s < nibs.length; s++)
-    addTone(data, dataStart + s * symN, B.notes[nibs[s]], toneN, sr,
-      audible ? { pluck: true, wave: "sine", harm: 0.15, amp: 0.3 } : { harm: B.harm });
+  // Each symbol lights one tone per group simultaneously. Per-tone amplitude is
+  // scaled down by the group count so the summed waveform doesn't clip.
+  const amp = Math.min(0.85 / G, 0.3);
+  for (let s = 0; s < nSym; s++)
+    for (let g = 0; g < G; g++) {
+      const idx = s * G + g;
+      const nib = idx < nibs.length ? nibs[idx] : 0; // pad the last symbol
+      addTone(data, dataStart + s * symN, freqOf(B, g, nib), toneN, sr, { pluck: B.pluck, wave: "sine", harm: B.harm, amp });
+    }
   return data;
 }
 
@@ -188,17 +188,16 @@ const dbg = (e: any) => { if (debugSink) try { debugSink(e); } catch {} };
 // self-test can probe every candidate tone.
 export function bandFreqs() {
   return {
-    audible: { marker: AUD_MARKER, notes: AUD_NOTES },
-    ultrasound: { marker: US_MARKER, notes: US_NOTES },
+    audible: { marker: 0, notes: binFreqs(BANDS.audible), groups: BANDS.audible.groups },
+    ultrasound: { marker: 0, notes: binFreqs(BANDS.ultrasound), groups: BANDS.ultrasound.groups },
   };
 }
-// Goertzel power at every marker/note of both bands over samples[start..start+n).
+// Goertzel power at every bin of both bands over samples[start..start+n).
 function spectrumAt(buf, start, n, sr) {
-  const P = bandFreqs();
-  const one = (fl: number[]) => fl.map((f) => goertzel(buf, start, n, f, sr));
+  const one = (B) => binFreqs(B).map((f) => goertzel(buf, start, n, f, sr));
   return {
-    audible: { marker: goertzel(buf, start, n, P.audible.marker, sr), notes: one(P.audible.notes) },
-    ultrasound: { marker: goertzel(buf, start, n, P.ultrasound.marker, sr), notes: one(P.ultrasound.notes) },
+    audible: { marker: 0, notes: one(BANDS.audible) },
+    ultrasound: { marker: 0, notes: one(BANDS.ultrasound) },
   };
 }
 
@@ -227,12 +226,17 @@ export function makeDecoder(sr, onComplete, onProgress) {
     for (let i = 0; i < chirpN; i++) { const x = buf[p + i]; dot += x * sig[i]; be += x * x; }
     return dot / Math.sqrt((be || 1e-12) * ref.e);
   };
+  // Decode one symbol → `groups` nibbles: for each group pick its loudest bin.
   const decodeSym = (s) => {
     const p = dataStart + s * symN;
     const win = Math.min(toneN, Math.round(band.detMs / 1000 * sr));
-    let best = -1, bi = 0;
-    for (let i = 0; i < 16; i++) { const g = goertzel(buf, p, win, band.notes[i], sr); if (g > best) { best = g; bi = i; } }
-    return bi;
+    const out: number[] = [];
+    for (let g = 0; g < band.groups; g++) {
+      let best = -1, bi = 0;
+      for (let bin = 0; bin < GROUP_BINS; bin++) { const gz = goertzel(buf, p, win, freqOf(band, g, bin), sr); if (gz > best) { best = gz; bi = bin; } }
+      out.push(bi);
+    }
+    return out;
   };
   const reset = () => { state = "search"; scan = Math.max(0, buf.length - chirpN); band = null; sym = 0; need = 0; nibs = []; curK = 0; curP = 0; bodyBytes = 0; };
 
@@ -261,8 +265,9 @@ export function makeDecoder(sr, onComplete, onProgress) {
     }
     if (state === "data") {
       while (dataStart + sym * symN + toneN <= buf.length) {
-        nibs.push(decodeSym(sym)); sym++;
-        if (sym === 6 && !need) {
+        for (const n of decodeSym(sym)) nibs.push(n); // `groups` nibbles per symbol
+        sym++;
+        if (!need && nibs.length >= 6) {
           // Three length bytes were sent; majority-vote so one flipped symbol
           // doesn't derail the whole frame, then derive the RS body size.
           const b0 = (nibs[0] << 4) | nibs[1], b1 = (nibs[2] << 4) | nibs[3], b2 = (nibs[4] << 4) | nibs[5];
@@ -270,10 +275,10 @@ export function makeDecoder(sr, onComplete, onProgress) {
           if (curK < 1 || curK > 254) { reset(); break; } // implausible length → resync
           curP = parityFor(curK);
           bodyBytes = curK + 1 + curP;
-          need = 6 + 2 * bodyBytes;
+          need = 6 + 2 * bodyBytes; // total nibbles
         }
-        if (need && onProgress) onProgress(Math.min(1, sym / need)); // length is sent first → we know the total
-        if (need && sym >= need) {
+        if (need && onProgress) onProgress(Math.min(1, nibs.length / need)); // length is sent first → we know the total
+        if (need && nibs.length >= need) {
           const body = new Uint8Array(bodyBytes);
           for (let i = 0; i < bodyBytes; i++) body[i] = (nibs[6 + 2 * i] << 4) | nibs[6 + 2 * i + 1];
           const msg = rsDecode(body, curP);            // repair up to curP/2 bad symbols
@@ -287,7 +292,7 @@ export function makeDecoder(sr, onComplete, onProgress) {
       }
     }
   }
-  return { push, reset };
+  return { push, reset, inFrame: () => state === "data" };
 }
 
 // ── Web Audio wrappers ─────────────────────────────────────────────────────
@@ -324,7 +329,8 @@ function stopTx() {
   if (txSource) { try { txSource.stop(); } catch {} txSource = null; }
 }
 
-let rxStream = null, rxNode = null, rxSrc = null, rxMute = null;
+let rxStream = null, rxNode = null, rxSrc = null, rxMute = null, rxDec = null;
+export const rxInFrame = () => !!rxDec && rxDec.inFrame(); // decoder is mid-frame (don't cut the listen)
 export async function startListening(onComplete, onProgress) {
   const c = audioCtx();
   await c.resume().catch(() => {});
@@ -335,6 +341,7 @@ export async function startListening(onComplete, onProgress) {
   rxSrc = c.createMediaStreamSource(rxStream);
   rxNode = c.createScriptProcessor(2048, 1, 1);
   const dec = makeDecoder(c.sampleRate, onComplete, onProgress);
+  rxDec = dec;
   rxNode.onaudioprocess = (e) => dec.push(new Float32Array(e.inputBuffer.getChannelData(0)));
   rxMute = c.createGain(); rxMute.gain.value = 0; // keep the processor pulling without echoing to speakers
   rxSrc.connect(rxNode); rxNode.connect(rxMute); rxMute.connect(c.destination);
@@ -344,6 +351,7 @@ function stopRx() {
   if (rxSrc) { try { rxSrc.disconnect(); } catch {} rxSrc = null; }
   if (rxMute) { try { rxMute.disconnect(); } catch {} rxMute = null; }
   if (rxStream) { rxStream.getTracks().forEach((t) => t.stop()); rxStream = null; }
+  rxDec = null;
 }
 
 export function stopAudio() { stopTx(); stopRx(); }
@@ -368,7 +376,7 @@ export async function selfTest(): Promise<SelfTest> {
   const P = bandFreqs();
   const order = ["audible", "ultrasound"] as const;
   const seq: number[] = [];
-  for (const b of order) seq.push(P[b].marker, ...P[b].notes);
+  for (const b of order) seq.push(...P[b].notes);
 
   const toneN = Math.round(0.07 * sr), gapN = Math.round(0.03 * sr), leadN = Math.round(0.3 * sr);
   const data = new Float32Array(leadN + seq.length * (toneN + gapN) + Math.round(0.15 * sr));
@@ -416,11 +424,12 @@ export async function selfTest(): Promise<SelfTest> {
   const snrDb = (f: number) => 10 * Math.log10(peakOf(f) / floorOf(f));
 
   const SNR_OK = 10;
+  const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1] ?? 0; };
   const bands: BandTest[] = order.map((name) => {
-    const markerSnr = snrDb(P[name].marker);
     const noteSnr = P[name].notes.map((f) => snrDb(f));
     const good = noteSnr.filter((s) => s >= SNR_OK).length;
-    return { name, markerSnr, noteSnr, good, ok: markerSnr >= SNR_OK && good >= 14 };
+    // markerSnr holds the median bin SNR now (no separate marker tone anymore).
+    return { name, markerSnr: median(noteSnr), noteSnr, good, ok: good >= noteSnr.length - 3 };
   });
 
   const us = bands.find((b) => b.name === "ultrasound")!;
@@ -466,7 +475,7 @@ export async function senseBusy(ms = 160): Promise<boolean> {
         // sweeping through the band). Ambient noise spreads across bins evenly and
         // stays below the ratio, so it doesn't false-trigger.
         for (const B of [BANDS.audible, BANDS.ultrasound]) {
-          const g = B.notes.map((f) => goertzel(buf, p, toneN, f, sr));
+          const g = binFreqs(B).map((f) => goertzel(buf, p, toneN, f, sr));
           let mx = 0; for (const v of g) if (v > mx) mx = v;
           const med = g.slice().sort((a, b) => a - b)[g.length >> 1];
           if (mx > 4 * (med || 1e-12) && mx > 1e-3) return finish(true);
@@ -580,10 +589,15 @@ export function listenFor(timeoutMs: number, onProgress?: (f: number) => void): 
   if (loopback) return lbListen(timeoutMs);
   return new Promise((resolve) => {
     if (aborted) return resolve(null);
-    let done = false;
+    let done = false, ext = 0, t: any;
     const finish = (v) => { if (done) return; done = true; clearTimeout(t); activeListen = null; stopRx(); resolve(v); };
+    // On timeout, don't abandon a frame that's actively decoding: a chirp that
+    // synced late in the window still needs ~3–4 s to finish its frame. Grant a
+    // few short extensions rather than cutting it off (that was the main reason
+    // long frames "arrived" but never completed).
+    const onTimeout = () => { if (rxInFrame() && ext++ < 3) { t = setTimeout(onTimeout, 2000); return; } finish(null); };
     activeListen = finish;
-    const t = setTimeout(() => finish(null), timeoutMs);
+    t = setTimeout(onTimeout, timeoutMs);
     startListening((bytes, band) => { lastRxBand = band; finish(bytes); }, onProgress)
       .catch(() => finish(null)); // e.g. mic permission denied → treat as "heard nothing"
   });

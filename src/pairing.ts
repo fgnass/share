@@ -5,7 +5,7 @@ import {
 } from "./webrtc";
 import {
   playFrame, listenFor, stopAudio, setUltrasound, resetAuto, abortAuto,
-  isOffer, isAnswer, isAck, ACK, rxBand, selfTest, senseBusy,
+  isOffer, isAnswer, isAck, ACK, rxBand, selfTest,
 } from "./music";
 import * as S from "./state";
 import { method as methodS } from "./state";
@@ -552,7 +552,7 @@ export function retryWithStun() {
 // re-listen with fresh random timing, so they desync instead of livelocking.
 // A device alone still only emits short ACK beacons (never its code) until it
 // hears a peer. Role/tiebreak/recovery run through onScan (shared with QR).
-const LISTEN_MIN = 12000, LISTEN_SPAN = 8000; // randomized listen window (12–20 s), catches one full RS-coded frame
+const LISTEN_MIN = 6000, LISTEN_SPAN = 6000; // randomized listen window (6–12 s), comfortably longer than one ~3.4 s frame
 let autoRunning = false, bandMatched = false, bandGuess = false, volumeLow = false, heardPeer = false, ackTick = 0;
 
 const setAudioStatus = (t: string) => (S.audioStatus.value = t);
@@ -613,9 +613,8 @@ export async function soundAuto() {
         // channel is clear. (Both hearing each other and both sending collides at
         // most once; RS/CRC reject it and the randomized re-listen desyncs them.)
         heardPeer = true; matchBand();
-        const busy = await senseBusy();
-        slog("peer ACK → send our code", { kind: isOffer(myAudio) ? "offer" : isAnswer(myAudio) ? "answer" : "?", bytes: myAudio?.length, busy });
-        if (!busy && !applied) {
+        slog("peer ACK → send our code", { kind: isOffer(myAudio) ? "offer" : isAnswer(myAudio) ? "answer" : "?", bytes: myAudio?.length });
+        if (!applied) {
           setAudioStatus("Sending your code…"); setProgress(0);
           await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
         }
@@ -635,13 +634,14 @@ export async function soundAuto() {
         continue;
       }
 
-      // Silent window → transmit. Once we've heard a peer we KNOW someone's there,
-      // so push our actual code (offer/answer) instead of waiting to catch their
-      // ACK — this is what removes the wasted rounds. Alone (never heard a peer) we
-      // only emit a short presence beacon, never blast the code into an empty room.
-      // Jitter + carrier sense keep two devices from transmitting in lockstep.
+      // Silent window (heard nothing) → transmit. Once we've heard a peer we KNOW
+      // someone's there, so push our actual code (offer/answer) instead of waiting
+      // to catch their ACK — this removes the wasted rounds. Alone (never heard a
+      // peer) we only emit a short presence beacon, never blast into an empty room.
+      // No carrier-sense gate: on a shared mic it false-triggers and deadlocks
+      // (both skip forever); listen-first + RS/CRC rejection handle the rare
+      // collision, and randomized windows desync the two sides.
       await sleep(rand(0, 500));
-      if (!alive() || (await senseBusy())) { slog("tx skipped (busy/dead)"); continue; }
       if (!alive()) break;
       pickTxBand(ackTick++);
       if (heardPeer && myAudio && !applied) {
