@@ -3,10 +3,14 @@ import * as S from "./state";
 import * as P from "./pairing";
 import * as Music from "./music";
 import { install } from "./pwa";
+import { keepAwake } from "./wakelock";
 import { Icon, Qr, fmt } from "./ui";
 
 export function App() {
   const s = S.screen.value;
+  // Hold a screen wake lock through the active flow so the phone doesn't sleep
+  // mid-pairing (which suspends the tab and kills the sound loop).
+  useEffect(() => { keepAwake(s === "pair" || s === "handoff" || s === "room"); }, [s]);
   useEffect(() => {
     if (!S.debug) return;
     Music.setDebugSink((e: any) => {
