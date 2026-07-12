@@ -5,7 +5,7 @@ import {
 } from "./webrtc";
 import {
   playFrame, listenFor, stopAudio, setUltrasound, resetAuto, abortAuto,
-  isOffer, isAnswer, isAck, ACK, rxBand, selfTest,
+  isOffer, isAnswer, isAck, isGot, ACK, GOT, rxBand, selfTest,
 } from "./music";
 import * as S from "./state";
 import { method as methodS } from "./state";
@@ -543,17 +543,19 @@ export function retryWithStun() {
   role === "answerer" && lastOfferCode ? buildAnswer(lastOfferCode) : mintOffer();
 }
 
-// ── Automatic sound pairing: symmetric, listen-first half-duplex (CSMA/CA) ──
-// No fixed roles. Every device LISTENS first (for a randomized window) and only
-// transmits into a silent channel, after a quick carrier-sense confirms nobody
-// else is mid-frame. Two devices tapped at the same instant therefore never open
-// by blaring over each other — the randomized windows make them fall into taking
-// turns, and any rare collision just garbles a frame (RS/CRC reject it) and both
-// re-listen with fresh random timing, so they desync instead of livelocking.
-// A device alone still only emits short ACK beacons (never its code) until it
-// hears a peer. Role/tiebreak/recovery run through onScan (shared with QR).
-const LISTEN_MIN = 6000, LISTEN_SPAN = 6000; // randomized listen window (6–12 s), comfortably longer than one ~3.4 s frame
-let autoRunning = false, bandMatched = false, bandGuess = false, volumeLow = false, heardPeer = false, ackTick = 0;
+// ── Automatic sound pairing: two-phase, directed half-duplex ──
+// Phase 1 (discovery): both devices trade tiny nonce beacons. These short frames
+// land reliably, and crucially NO long code is sent yet — so two long offers can
+// never collide. Once each knows the other's nonce, the roles are fixed with no
+// app-level fixed roles: higher nonce = offerer, lower = answerer.
+// Phase 2 (directed): only ONE side transmits a long frame at a time. The offerer
+// loops its offer and listens for the answer; the answerer listens for the offer,
+// then sends a tiny GOT (handoff: "I have your offer, stop offering") followed by
+// its answer. The offerer hears GOT → goes quiet and just listens → gets the
+// answer → WebRTC connects (the open data channel is the final ack). The answer
+// causally depends on the offer, so the exchange is inherently sequential and
+// half-duplex is no handicap. Role/tiebreak/recovery still run through onScan.
+let autoRunning = false, bandMatched = false, bandGuess = false, volumeLow = false, ackTick = 0;
 
 const setAudioStatus = (t: string) => (S.audioStatus.value = t);
 const setProgress = (f: number | null) => (S.audioProgress.value = f);
@@ -566,19 +568,22 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // tabs' logs are easy to tell apart in one console.
 const slog = (...a: any[]) => { if (S.debug || S.loopbackMode) console.log(`%c[sound ${myNonce}]`, "color:#6ea8ff;font-weight:bold", ...a); };
 const ackFrame = () => new Uint8Array([ACK, (myNonce >> 8) & 255, myNonce & 255]);
-const ackNonce = (f: Uint8Array) => (f[1] << 8) | f[2];
+const gotFrame = () => new Uint8Array([GOT, (myNonce >> 8) & 255, myNonce & 255]);
+const ctlNonce = (f: Uint8Array) => (f[1] << 8) | f[2]; // ACK/GOT payload = [type, nonceHi, nonceLo]
 const codeOf = (f: Uint8Array) => b64u(f.subarray(1));
+const peerNonceOf = (code: string): number | null => { try { return decode(code).nonce; } catch { return null; } };
 const alive = () => autoRunning && !entered;
 function matchBand() { volumeLow = false; if (S.bandMode.value === "auto") { setUltrasound(rxBand() === "ultrasound"); bandMatched = true; } }
 // In auto mode we alternate bands to probe — UNLESS the self-test already gave a
 // hardware-informed guess (then hold it until we actually receive a frame, which
 // locks the band via matchBand). Once matched, never override.
 function pickTxBand(i: number) { if (S.bandMode.value === "auto" && !bandMatched && !bandGuess) setUltrasound(i % 2 === 0); }
+const heardStr = (f: Uint8Array | null) => f ? (isAck(f) ? `ACK ${ctlNonce(f)}` : isGot(f) ? `GOT ${ctlNonce(f)}` : isOffer(f) ? "OFFER" : isAnswer(f) ? "ANSWER" : `0x${f[0].toString(16)}`) : "nothing";
 
 export async function soundAuto() {
   if (autoRunning) return;
   autoRunning = true; resetAuto(); soundBusyUI(true);
-  bandMatched = false; bandGuess = false; volumeLow = false; heardPeer = false; ackTick = 0;
+  bandMatched = false; bandGuess = false; volumeLow = false; ackTick = 0;
   slog("soundAuto start", { role, myNonce, band: S.bandMode.value, loopback: S.loopbackMode });
   if (S.loopbackMode) {
     bandMatched = true; // no bands over the loopback channel
@@ -591,71 +596,81 @@ export async function soundAuto() {
     setAudioStatus("Checking speaker & mic…");
     try {
       const r = await selfTest();
-      slog("self-test", { recommend: r.recommend, good: r.bands.map((b) => `${b.name}:${b.good}/16`) });
-      if (alive()) {
-        setUltrasound(r.recommend === "ultrasound"); bandGuess = true;
-        volumeLow = r.recommend === "louder";
-      }
+      slog("self-test", { recommend: r.recommend });
+      if (alive()) { setUltrasound(r.recommend === "ultrasound"); bandGuess = true; volumeLow = r.recommend === "louder"; }
     } catch (e) { slog("self-test failed", e); /* mic denied etc. → blind band alternation */ }
   }
   if (!alive()) { autoRunning = false; soundBusyUI(false); return; }
+
+  let peerNonce: number | null = null;
   try {
-    while (alive()) {
-      // LISTEN first (randomized window). Never open by transmitting.
-      const win = S.loopbackMode ? rand(1200, 1600) : rand(LISTEN_MIN, LISTEN_SPAN);
-      slog(`listening ${win}ms (role=${role})`);
-      const f = await listenFor(win, setProgress); setProgress(null);
+    // ── PHASE 1: DISCOVERY ── learn the peer's nonce via short beacons only.
+    while (alive() && !committed && peerNonce === null) {
+      setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself." : "Looking for the other device…");
+      const f = await listenFor(rand(2500, 2500));
       if (!alive()) break;
-      slog("heard", f ? (isAck(f) ? `ACK nonce=${ackNonce(f)}` : isOffer(f) ? "OFFER" : isAnswer(f) ? "ANSWER" : `type=0x${f[0].toString(16)}`) : "nothing");
-
-      if (isAck(f) && ackNonce(f!) !== myNonce) {
-        // Peer announced presence → hand them our current code, once, if the
-        // channel is clear. (Both hearing each other and both sending collides at
-        // most once; RS/CRC reject it and the randomized re-listen desyncs them.)
-        heardPeer = true; matchBand();
-        slog("peer ACK → send our code", { kind: isOffer(myAudio) ? "offer" : isAnswer(myAudio) ? "answer" : "?", bytes: myAudio?.length });
-        if (!applied) {
-          setAudioStatus("Sending your code…"); setProgress(0);
-          await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
-        }
-        continue;
-      }
-      if (isAnswer(f)) {
-        heardPeer = true;
-        const code = codeOf(f!);
-        if (code !== myCode) { matchBand(); setAudioStatus("Got their reply — connecting…"); slog("→ onScan(answer)"); onScan({ type: "a", code }); }
-        continue;
-      }
-      if (isOffer(f)) {
-        heardPeer = true;
-        const code = codeOf(f!);
-        if (code !== myCode) { matchBand(); slog("→ onScan(offer)"); onScan({ type: "o", code }); }
-        else slog("ignored own offer echo");
-        continue;
-      }
-
-      // Silent window (heard nothing) → transmit. Once we've heard a peer we KNOW
-      // someone's there, so push our actual code (offer/answer) instead of waiting
-      // to catch their ACK — this removes the wasted rounds. Alone (never heard a
-      // peer) we only emit a short presence beacon, never blast into an empty room.
-      // No carrier-sense gate: on a shared mic it false-triggers and deadlocks
-      // (both skip forever); listen-first + RS/CRC rejection handle the rare
-      // collision, and randomized windows desync the two sides.
-      await sleep(rand(0, 500));
-      if (!alive()) break;
-      pickTxBand(ackTick++);
-      if (heardPeer && myAudio && !applied) {
-        setAudioStatus("Sending your code…"); setProgress(0);
-        slog(`push code (${isOffer(myAudio) ? "offer" : "answer"}, tick ${ackTick})`);
-        await playFrame(myAudio, { intro: false, onprogress: setProgress }); setProgress(null);
-      } else {
-        setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself."
-          : role === "answerer" ? "Ready — waiting for their go-ahead…" : "Looking for the other device…");
-        slog(`beacon ACK (tick ${ackTick})`);
-        await playFrame(ackFrame(), { intro: ackTick % 3 === 0 });
+      slog("discover heard", heardStr(f));
+      if ((isAck(f) || isGot(f)) && ctlNonce(f!) !== myNonce) { peerNonce = ctlNonce(f!); matchBand(); }
+      else if (isOffer(f)) { const code = codeOf(f!); if (code !== myCode) { matchBand(); peerNonce = peerNonceOf(code); onScan({ type: "o", code }); } }
+      else if (isAnswer(f)) { const code = codeOf(f!); if (code !== myCode) { matchBand(); onScan({ type: "a", code }); } }
+      else { // silent → short nonce beacon
+        await sleep(rand(0, 300));
+        if (!alive()) break;
+        pickTxBand(ackTick++);
+        slog("discover beacon");
+        await playFrame(ackFrame(), { intro: false });
       }
     }
-  } catch { setAudioStatus("Audio/mic unavailable on this device."); }
+    if (peerNonce !== null) slog(`role resolved: ${myNonce > peerNonce ? "OFFERER" : "answerer"} (peer ${peerNonce})`);
+
+    // ── PHASE 2: DIRECTED EXCHANGE ──
+    // Offerer = higher nonce and still holding an offer. The lower-nonce device is
+    // the answerer, but can only build its answer once it has received the offer.
+    const iAmOfferer = () => role === "offerer" && (peerNonce === null || myNonce > peerNonce);
+    while (alive()) {
+      if (iAmOfferer()) {
+        if (applied) { await listenFor(rand(4000, 2000)); continue; } // answer applied → just wait for connect
+        setAudioStatus("Sending your code…"); setProgress(0);
+        slog("send OFFER");
+        await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
+        if (!alive()) break;
+        setAudioStatus("Waiting for their reply…");
+        let rounds = 1; // extend once if we hear GOT (answer is on its way)
+        for (let i = 0; alive() && i < rounds; i++) {
+          const f = await listenFor(rand(7000, 3000));
+          if (!alive()) break;
+          slog("offerer heard", heardStr(f));
+          if (isAnswer(f)) { const code = codeOf(f!); if (code !== myCode) { matchBand(); slog("→ onScan(answer)"); onScan({ type: "a", code }); } break; }
+          if (isGot(f) && ctlNonce(f!) !== myNonce) { rounds = 2; continue; }        // answer imminent → keep listening
+          if (isOffer(f)) { const code = codeOf(f!); if (code !== myCode) onScan({ type: "o", code }); } // both offered → tiebreak
+        }
+      } else if (role === "answerer" && isAnswer(myAudio)) {
+        // Answer is built → tell the offerer to stop offering, then send the answer.
+        slog("send GOT + ANSWER");
+        await playFrame(gotFrame(), { intro: false });
+        if (!alive()) break;
+        setAudioStatus("Sending your reply…"); setProgress(0);
+        await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
+        if (!alive()) break;
+        await listenFor(rand(2500, 1500)); // brief listen; a re-heard offer means our answer missed → loop resends
+      } else {
+        // Designated answerer without the offer yet (or answer still building).
+        // Keep beaconing our nonce — the offerer may still be in discovery and
+        // needs to hear us before it starts sending the offer — then listen for
+        // the offer; onScan → becomeAnswerer builds the answer.
+        setAudioStatus("Waiting for their code…");
+        pickTxBand(ackTick++);
+        slog("answerer beacon + listen");
+        await playFrame(ackFrame(), { intro: false });
+        if (!alive()) break;
+        const f = await listenFor(rand(6000, 3000));
+        if (!alive()) break;
+        slog("answerer heard", heardStr(f));
+        if (isOffer(f)) { const code = codeOf(f!); if (code !== myCode) { matchBand(); slog("→ onScan(offer)"); onScan({ type: "o", code }); } }
+        else if ((isAck(f) || isGot(f)) && ctlNonce(f!) !== myNonce && peerNonce === null) peerNonce = ctlNonce(f!);
+      }
+    }
+  } catch (e) { slog("error", e); setAudioStatus("Audio/mic unavailable on this device."); }
   autoRunning = false; soundBusyUI(false);
 }
 

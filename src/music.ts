@@ -527,10 +527,15 @@ export const BEACON = 0xb0;
 // nonce so a device can tell a peer's ACK from its own echo. A payload (offer/
 // answer) is only ever transmitted right after hearing a *peer's* ACK.
 export const ACK = 0xac;
+// GOT = "I have decoded your offer" — the handoff signal. When the offerer hears
+// it, it stops re-sending the offer and just listens for the incoming answer,
+// so its offer re-sends can't collide with the answer. Carries the sender nonce.
+export const GOT = 0x67;
 export const isOffer = (b: Uint8Array | null): boolean => !!b && b[0] === 0x6f;
 export const isAnswer = (b: Uint8Array | null): boolean => !!b && b[0] === 0x61;
 export const isBeacon = (b: Uint8Array | null): boolean => !!b && b[0] === BEACON;
 export const isAck = (b: Uint8Array | null): boolean => !!b && b[0] === ACK && b.length >= 3;
+export const isGot = (b: Uint8Array | null): boolean => !!b && b[0] === GOT && b.length >= 3;
 
 let aborted = false, activeListen = null, lastRxBand = null;
 export function resetAuto() { aborted = false; }
