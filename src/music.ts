@@ -15,7 +15,7 @@
 
 import { rsEncode, rsDecode } from "./rs";
 
-const TONE_MS = 36, GAP_MS = 6, SYNC_MS = 140, SYNC_GAP_MS = 40, DET_MS = 28;
+const TONE_MS = 36, GAP_MS = 6, CHIRP_MS = 80, SYNC_GAP_MS = 40, DET_MS = 28;
 
 const midiHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
 // Audible band: 16 notes of C major pentatonic (C D E G A) from C5 up — a bright
@@ -40,8 +40,12 @@ const BANDS = {
   // detMs: how much of each note to integrate when decoding. Audible notes are
   // plucked (they decay), so detect on the loud attack; ultrasound is held, so
   // use the full note for max energy/resolution.
-  audible: { name: "audible", notes: AUD_NOTES, marker: AUD_MARKER, harm: 0.15, detMs: DET_MS },
-  ultrasound: { name: "ultrasound", notes: US_NOTES, marker: US_MARKER, harm: 0, detMs: TONE_MS },
+  // chirp: [f0,f1] of the sync sweep (see buildChirp). The two bands sweep
+  // disjoint ranges so a matched filter also tells the receiver which band it is.
+  // chirp sweep BW is kept moderate (~1.2–1.6 kHz): a wider sweep compresses to
+  // a peak narrower than the coarse scan hop and gets stepped over.
+  audible: { name: "audible", notes: AUD_NOTES, marker: AUD_MARKER, harm: 0.15, detMs: DET_MS, chirp: [2100, 3300] },
+  ultrasound: { name: "ultrasound", notes: US_NOTES, marker: US_MARKER, harm: 0, detMs: TONE_MS, chirp: [15700, 17300] },
 };
 // Which band we TRANSMIT in. The receiver auto-detects, so this need not match
 // the other device.
@@ -111,8 +115,8 @@ function addTone(data, off, freq, n, sr, { harm = 0, amp = 0.32, pluck = false, 
 
 // Opening of the Super Mario Bros. ground theme (E E · E · C E · G ··· g), in
 // chiptune, with its real syncopated rhythm. [midi | null=rest, ms]. Same square
-// voice/register as the data so it blends. Purely cosmetic — the decoder finds
-// the sync marker after it and ignores these notes.
+// voice/register as the data so it blends. Purely cosmetic — the decoder locks
+// onto the chirp preamble after it and ignores these notes.
 const MARIO_RIFF = [
   [76, 100], [76, 100], [null, 100], [76, 100], [null, 100],
   [72, 100], [76, 100], [null, 100], [79, 200], [null, 200], [67, 200],
@@ -128,16 +132,34 @@ function renderRiff(data, off, sr) {
   return p - off;
 }
 
+// Linear frequency-sweep preamble. Replaces the held marker tone: a chirp gives
+// the receiver a sharp matched-filter correlation peak (see the decoder), so
+// sync survives reverb and noise far better than thresholding one tone's power,
+// and it pins the data-start to a few ms. Hann-tapered ends to avoid clicks.
+function buildChirp(band, sr, amp = 1) {
+  const n = Math.round(CHIRP_MS / 1000 * sr);
+  const out = new Float32Array(n);
+  const [f0, f1] = band.chirp, T = n / sr, k = (f1 - f0) / T, edge = Math.max(1, Math.round(n * 0.15));
+  for (let i = 0; i < n; i++) {
+    const t = i / sr;
+    let e = 1;
+    if (i < edge) e = 0.5 - 0.5 * Math.cos(Math.PI * i / edge);
+    else if (i > n - edge) e = 0.5 - 0.5 * Math.cos(Math.PI * (n - i) / edge);
+    out[i] = amp * e * Math.sin(2 * Math.PI * (f0 * t + 0.5 * k * t * t));
+  }
+  return out;
+}
+
 export function encodeWaveform(payload, sr, mode = txMode, withIntro = true) {
   const B = BANDS[mode] || BANDS.audible, audible = mode !== "ultrasound";
   const toneN = Math.round(TONE_MS / 1000 * sr), symN = toneN + Math.round(GAP_MS / 1000 * sr);
-  const syncN = Math.round(SYNC_MS / 1000 * sr), sgN = Math.round(SYNC_GAP_MS / 1000 * sr);
+  const chirpN = Math.round(CHIRP_MS / 1000 * sr), sgN = Math.round(SYNC_GAP_MS / 1000 * sr);
   const nibs = frameNibbles(payload);
-  const riffN = (audible && withIntro) ? riffSamples(sr) + Math.round(sr * 0.12) : 0; // riff + a short gap before the marker
-  const dataStart = riffN + syncN + sgN;
+  const riffN = (audible && withIntro) ? riffSamples(sr) + Math.round(sr * 0.12) : 0; // riff + a short gap before the chirp
+  const dataStart = riffN + chirpN + sgN;
   const data = new Float32Array(dataStart + nibs.length * symN + Math.round(sr * 0.05));
   if (audible) renderRiff(data, 0, sr);                             // cosmetic Mario intro
-  addTone(data, riffN, B.marker, syncN, sr, {});                   // start marker (held sine)
+  data.set(buildChirp(B, sr, audible ? 0.5 : 0.6), riffN);        // sync preamble (frequency sweep), region is silent
   // Data notes are plucky sine (robust: square's harmonics collide with other
   // note bins and can flip a symbol). The chiptune character lives in the intro.
   for (let s = 0; s < nibs.length; s++)
@@ -184,23 +206,26 @@ function spectrumAt(buf, start, n, sr) {
 // when a CRC-valid frame is recovered.
 export function makeDecoder(sr, onComplete, onProgress) {
   const toneN = Math.round(TONE_MS / 1000 * sr), symN = toneN + Math.round(GAP_MS / 1000 * sr);
-  const syncN = Math.round(SYNC_MS / 1000 * sr), sgN = Math.round(SYNC_GAP_MS / 1000 * sr);
-  const hop = Math.max(64, Math.round(sr * 0.004));
-  let buf = new Float32Array(0), state = "search", scan = 0, runStart = -1, runBand = null;
+  const chirpN = Math.round(CHIRP_MS / 1000 * sr), sgN = Math.round(SYNC_GAP_MS / 1000 * sr);
+  // Coarse scan step. The chirp compresses to a peak a few ms wide, so the coarse
+  // hop must be smaller than the main lobe (≈ sr/bandwidth) or it steps over it.
+  const COARSE = Math.max(8, Math.round(sr * 0.0003)); // ~0.3 ms
+  // Matched-filter references: each band's exact chirp plus its energy, so a
+  // normalized cross-correlation gives a scale-free peak in [0,1]. The band with
+  // the strongest peak both syncs and tells us which band the sender used.
+  const refs = [BANDS.audible, BANDS.ultrasound].map((B) => {
+    const sig = buildChirp(B, sr, 1); let e = 0; for (const x of sig) e += x * x;
+    return { band: B, sig, e: Math.max(e, 1e-12) };
+  });
+  const CHIRP_THRESH = 0.35;
+  let buf = new Float32Array(0), state = "search", scan = 0;
   let band = null, dataStart = 0, sym = 0, need = 0, nibs = [], curK = 0, curP = 0, bodyBytes = 0;
 
-  // Return the band whose marker dominates at position p, or null. Auto-detects
-  // audible vs ultrasound so the sender's choice needn't match the listener.
-  const dominantBand = (p) => {
-    if (p + toneN > buf.length) return null;
-    let bestBand = null, bestMp = 0;
-    for (const B of [BANDS.audible, BANDS.ultrasound]) {
-      const mp = goertzel(buf, p, toneN, B.marker, sr);
-      let mx = 0;
-      for (const f of B.notes) { const g = goertzel(buf, p, toneN, f, sr); if (g > mx) mx = g; }
-      if (mp > 3 * mx && mp > 1e-3 && mp > bestMp) { bestMp = mp; bestBand = B; }
-    }
-    return bestBand;
+  // Normalized cross-correlation of the buffer at offset p against a chirp ref.
+  const corrAt = (p, ref) => {
+    let dot = 0, be = 0; const sig = ref.sig;
+    for (let i = 0; i < chirpN; i++) { const x = buf[p + i]; dot += x * sig[i]; be += x * x; }
+    return dot / Math.sqrt((be || 1e-12) * ref.e);
   };
   const decodeSym = (s) => {
     const p = dataStart + s * symN;
@@ -209,7 +234,7 @@ export function makeDecoder(sr, onComplete, onProgress) {
     for (let i = 0; i < 16; i++) { const g = goertzel(buf, p, win, band.notes[i], sr); if (g > best) { best = g; bi = i; } }
     return bi;
   };
-  const reset = () => { state = "search"; scan = Math.max(0, buf.length - toneN); runStart = -1; runBand = null; band = null; sym = 0; need = 0; nibs = []; curK = 0; curP = 0; bodyBytes = 0; };
+  const reset = () => { state = "search"; scan = Math.max(0, buf.length - chirpN); band = null; sym = 0; need = 0; nibs = []; curK = 0; curP = 0; bodyBytes = 0; };
 
   function push(chunk) {
     const nb = new Float32Array(buf.length + chunk.length);
@@ -219,22 +244,19 @@ export function makeDecoder(sr, onComplete, onProgress) {
       dbg({ t: "spectrum", sr, state, spectrum: spectrumAt(buf, buf.length - toneN, toneN, sr) });
 
     if (state === "search") {
-      for (; scan + toneN <= buf.length; scan += hop) {
-        const d = dominantBand(scan);
-        if (d) {
-          if (d !== runBand) { runBand = d; runStart = scan; }
-          else if (scan - runStart >= syncN * 0.5) {
-            // runStart can be up to a tone-window early (the window catches the
-            // marker's leading edge across preceding silence, e.g. after the
-            // intro riff). Refine to the marker's true start at sample precision.
-            const full = goertzel(buf, runStart + toneN, toneN, runBand.marker, sr);
-            let q = runStart;
-            while (q + toneN < buf.length && goertzel(buf, q, toneN, runBand.marker, sr) < 0.85 * full) q += 64;
-            state = "data"; band = runBand; dataStart = q + syncN + sgN; sym = 0; need = 0; nibs = [];
-            dbg({ t: "sync", band: band.name });
-            break;
-          }
-        } else { runStart = -1; runBand = null; }
+      for (; scan + chirpN <= buf.length; scan += COARSE) {
+        let c0 = 0, r0 = null;
+        for (const ref of refs) { const c = corrAt(scan, ref); if (c > c0) { c0 = c; r0 = ref; } }
+        if (c0 < CHIRP_THRESH) continue;
+        // Coarse hit → refine to the true peak in a ±COARSE neighbourhood, then
+        // lock: the chirp starts at bp, so data begins one chirp + gap later.
+        let bp = scan, bc = c0, br = r0;
+        for (let q = Math.max(0, scan - COARSE); q <= scan + COARSE && q + chirpN <= buf.length; q += 3) {
+          for (const ref of refs) { const c = corrAt(q, ref); if (c > bc) { bc = c; bp = q; br = ref; } }
+        }
+        state = "data"; band = br.band; dataStart = bp + chirpN + sgN; sym = 0; need = 0; nibs = [];
+        dbg({ t: "sync", band: band.name, corr: Math.round(bc * 100) / 100 });
+        break;
       }
     }
     if (state === "data") {
@@ -439,10 +461,14 @@ export async function senseBusy(ms = 160): Promise<boolean> {
         const nb = new Float32Array(buf.length + ch.length); nb.set(buf); nb.set(ch, buf.length); buf = nb;
         if (buf.length < toneN) return;
         const p = buf.length - toneN;
+        // Busy if a single note bin dominates — a peer's data tone (or its chirp
+        // sweeping through the band). Ambient noise spreads across bins evenly and
+        // stays below the ratio, so it doesn't false-trigger.
         for (const B of [BANDS.audible, BANDS.ultrasound]) {
-          const mp = goertzel(buf, p, toneN, B.marker, sr);
-          let mx = 0; for (const f of B.notes) { const g = goertzel(buf, p, toneN, f, sr); if (g > mx) mx = g; }
-          if (mp > 3 * mx && mp > 1e-3) return finish(true);
+          const g = B.notes.map((f) => goertzel(buf, p, toneN, f, sr));
+          let mx = 0; for (const v of g) if (v > mx) mx = v;
+          const med = g.slice().sort((a, b) => a - b)[g.length >> 1];
+          if (mx > 4 * (med || 1e-12) && mx > 1e-3) return finish(true);
         }
       };
       mute = c.createGain(); mute.gain.value = 0;
