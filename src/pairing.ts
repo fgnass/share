@@ -5,7 +5,7 @@ import {
 } from "./webrtc";
 import {
   playFrame, listenFor, stopAudio, setUltrasound, resetAuto, abortAuto,
-  isOffer, isAnswer, isAck, ACK, rxBand,
+  isOffer, isAnswer, isAck, ACK, rxBand, selfTest,
 } from "./music";
 import * as S from "./state";
 import { method as methodS } from "./state";
@@ -547,7 +547,7 @@ export function retryWithStun() {
 // start holding an offer; role, tiebreak and recovery all run through onScan
 // (shared with the QR path), which flips a device to answerer when appropriate.
 const LISTEN_MS = 18000; // long enough to capture one full payload in a single listen
-let autoRunning = false, bandMatched = false, ackTick = 0;
+let autoRunning = false, bandMatched = false, bandGuess = false, volumeLow = false, ackTick = 0;
 
 const setAudioStatus = (t: string) => (S.audioStatus.value = t);
 const setProgress = (f: number | null) => (S.audioProgress.value = f);
@@ -560,14 +560,31 @@ const ackFrame = () => new Uint8Array([ACK, (myNonce >> 8) & 255, myNonce & 255]
 const ackNonce = (f: Uint8Array) => (f[1] << 8) | f[2];
 const codeOf = (f: Uint8Array) => b64u(f.subarray(1));
 const alive = () => autoRunning && !entered;
-function matchBand() { if (S.bandMode.value === "auto") { setUltrasound(rxBand() === "ultrasound"); bandMatched = true; } }
-function pickTxBand(i: number) { if (S.bandMode.value === "auto" && !bandMatched) setUltrasound(i % 2 === 0); }
+function matchBand() { volumeLow = false; if (S.bandMode.value === "auto") { setUltrasound(rxBand() === "ultrasound"); bandMatched = true; } }
+// In auto mode we alternate bands to probe — UNLESS the self-test already gave a
+// hardware-informed guess (then hold it until we actually receive a frame, which
+// locks the band via matchBand). Once matched, never override.
+function pickTxBand(i: number) { if (S.bandMode.value === "auto" && !bandMatched && !bandGuess) setUltrasound(i % 2 === 0); }
 
 export async function soundAuto() {
   if (autoRunning) return;
   autoRunning = true; resetAuto(); soundBusyUI(true);
-  bandMatched = false; ackTick = 0;
+  bandMatched = false; bandGuess = false; volumeLow = false; ackTick = 0;
   if (S.bandMode.value !== "auto") { setUltrasound(S.bandMode.value === "ultrasound"); bandMatched = true; }
+  else {
+    // Capability check first: play tones through our own speaker and see which
+    // band our own mic hears. Pick the highest band that round-trips; if we can't
+    // even hear our own audible, the device is muted / too quiet — tell the user.
+    setAudioStatus("Checking speaker & mic…");
+    try {
+      const r = await selfTest();
+      if (alive()) {
+        setUltrasound(r.recommend === "ultrasound"); bandGuess = true;
+        volumeLow = r.recommend === "louder";
+      }
+    } catch { /* mic denied etc. → fall back to blind band alternation */ }
+  }
+  if (!alive()) { autoRunning = false; soundBusyUI(false); return; }
   try {
     while (alive()) {
       // A little jitter so two devices don't lock into playing over each other.
@@ -576,7 +593,8 @@ export async function soundAuto() {
       // Announce we're here and ready to receive. ACK is a control frame, safe to
       // send unsolicited; the Mario theme rides along every few beats for flavour.
       pickTxBand(ackTick);
-      setAudioStatus(role === "answerer" ? "Ready — waiting for their go-ahead…" : "Looking for the other device…");
+      setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself."
+        : role === "answerer" ? "Ready — waiting for their go-ahead…" : "Looking for the other device…");
       await playFrame(ackFrame(), { intro: ackTick % 3 === 0 });
       ackTick++;
       if (!alive()) break;

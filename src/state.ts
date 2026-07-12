@@ -57,6 +57,20 @@ export const canInstall = signal(false);
 export const isIOS = signal(/iphone|ipad|ipod/i.test(navigator.userAgent) &&
   !(matchMedia("(display-mode: standalone)").matches || (navigator as any).standalone === true));
 
+// ── Dev debug view (add ?debug to the URL) ──
+// Fed by music.ts's debug sink (wired in App). Lets us see, on a real device,
+// exactly which tones the mic picks up and how the decoder/self-test behave.
+export const debug = new URLSearchParams(location.search).has("debug");
+export const dbgSpectrum = signal<any>(null);   // latest {sr, state, spectrum:{audible,ultrasound}}
+export const dbgState = signal<string>("idle");
+export const dbgSelfTest = signal<any>(null);   // latest SelfTest report
+export const dbgMonitor = signal(false);        // standalone live monitor running
+export const dbgLog = signal<string[]>([]);
+export function dbgPush(line: string) {
+  const stamp = new Date().toLocaleTimeString().split(" ")[0];
+  dbgLog.value = [...dbgLog.value.slice(-40), `${stamp}  ${line}`];
+}
+
 let msgId = 0;
 export const nextId = () => ++msgId;
 export function pushMsg(m: Msg) { messages.value = [...messages.value, m]; }

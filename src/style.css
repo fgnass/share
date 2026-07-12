@@ -382,3 +382,38 @@ a { color: var(--accent); }
 .composer textarea { flex: 1; resize: none; max-height: 120px; border-radius: 999px; padding: 11px 16px; }
 .iconbtn { width: 44px; height: 44px; flex: none; padding: 0; }
 .iconbtn svg { width: 19px; height: 19px; }
+
+/* ── Dev debug view (?debug) ─────────────────────────────────────────────── */
+.dbg {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 9999;
+  background: rgba(10, 12, 16, 0.96); border-top: 1px solid var(--border);
+  color: var(--ink); font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 8px 10px; max-height: 46vh; overflow-y: auto;
+}
+.dbghead { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; color: var(--muted); }
+.dbghead b { color: var(--accent); text-transform: none; }
+.dbghead > span { flex: 1; }
+.dbghead button {
+  font: inherit; width: auto; flex: 0 0 auto; text-transform: none; letter-spacing: 0;
+  font-weight: 600; padding: 3px 9px; border-radius: 6px; box-shadow: none;
+  background: var(--panel-2); color: var(--ink); border: 1px solid var(--border);
+}
+.dbghead button:hover { transform: none; box-shadow: none; border-color: var(--ink); }
+.dbghead button:disabled { opacity: 0.5; }
+.specwrap { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.specrow { display: flex; align-items: flex-end; gap: 2px; height: 46px; }
+.specrow .slbl { width: 26px; color: var(--muted); align-self: center; }
+.specrow .sbar { flex: 1; min-height: 1px; background: var(--muted); opacity: 0.55; border-radius: 1px 1px 0 0; }
+.specrow .sbar.pk { background: var(--accent); opacity: 1; }
+.specrow .sbar.mk { background: #6ea8ff; opacity: 0.9; margin-right: 4px; }
+.dbgtest { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+.tband { display: flex; align-items: flex-end; gap: 8px; }
+.tband .tname { width: 190px; color: var(--muted); }
+.tband .tname.ok { color: var(--ok); }
+.tband .tname.bad { color: var(--err); }
+.tcells { flex: 1; display: flex; align-items: flex-end; gap: 2px; height: 26px; }
+.tcells i { flex: 1; min-height: 2px; border-radius: 1px; }
+.tcells i.g { background: var(--ok); }
+.tcells i.b { background: var(--err); opacity: 0.6; }
+.dbgtest .trec { color: var(--ink); }
+.dbglog { color: var(--muted); white-space: pre-wrap; border-top: 1px solid var(--border); padding-top: 6px; }

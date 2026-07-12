@@ -23,11 +23,17 @@ const midiHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
 const PENT = [0, 2, 4, 7, 9];
 const AUD_NOTES = Array.from({ length: 16 }, (_, i) => midiHz(72 + 12 * Math.floor(i / 5) + PENT[i % 5]));
 const AUD_MARKER = midiHz(109);
-// Ultrasound band: 16 tones 17.6–20.0 kHz (near-inaudible to adults), marker
-// just below. Not musical, but nobody hears it. No 2nd harmonic here — it would
-// alias back into the audible range.
-const US_NOTES = Array.from({ length: 16 }, (_, i) => 17600 + i * 160);
-const US_MARKER = 17300;
+// Ultrasound band: 16 tones 15.6–18.0 kHz, marker just below. Kept ≤18 kHz on
+// purpose — most laptop/phone speakers and MEMS mics roll off steeply above
+// ~18 kHz, and at a 44.1 kHz context 20 kHz sits right under Nyquist where the
+// anti-alias filter eats it. ggwave's ultrasonic band started at 15 kHz and
+// worked; the previous 17.6–20 kHz plan here did not. Near-silent to most
+// adults; the self-test + audible fallback cover devices that still can't manage
+// it. No 2nd harmonic (it would alias into the audible range). These frequencies
+// are FIXED: two devices must agree on them, so the self-test only chooses WHICH
+// band to use, never invents per-device frequencies.
+const US_NOTES = Array.from({ length: 16 }, (_, i) => 15600 + i * 160);
+const US_MARKER = 15400;
 const BANDS = {
   // detMs: how much of each note to integrate when decoding. Audible notes are
   // plucked (they decay), so detect on the loud attack; ultrasound is held, so
@@ -131,6 +137,32 @@ function goertzel(s, start, n, freq, sr) {
   return s1 * s1 + s2 * s2 - k * s1 * s2;
 }
 
+// ── Debug instrumentation ───────────────────────────────────────────────────
+// A single optional sink the dev debug view subscribes to. music.ts stays free
+// of app/state imports (so the codec is still unit-testable in Node); the UI
+// wires this up. Events: {t:"spectrum", ...}, {t:"frame", ok, ...}, {t:"note"}.
+let debugSink: ((e: any) => void) | null = null;
+export function setDebugSink(fn: ((e: any) => void) | null) { debugSink = fn; }
+const dbg = (e: any) => { if (debugSink) try { debugSink(e); } catch {} };
+
+// The fixed frequency plan, exposed so the debug view can label bars and the
+// self-test can probe every candidate tone.
+export function bandFreqs() {
+  return {
+    audible: { marker: AUD_MARKER, notes: AUD_NOTES },
+    ultrasound: { marker: US_MARKER, notes: US_NOTES },
+  };
+}
+// Goertzel power at every marker/note of both bands over samples[start..start+n).
+function spectrumAt(buf, start, n, sr) {
+  const P = bandFreqs();
+  const one = (fl: number[]) => fl.map((f) => goertzel(buf, start, n, f, sr));
+  return {
+    audible: { marker: goertzel(buf, start, n, P.audible.marker, sr), notes: one(P.audible.notes) },
+    ultrasound: { marker: goertzel(buf, start, n, P.ultrasound.marker, sr), notes: one(P.ultrasound.notes) },
+  };
+}
+
 // Incremental decoder: feed mic sample chunks via push(); calls onComplete(payload)
 // when a CRC-valid frame is recovered.
 export function makeDecoder(sr, onComplete, onProgress) {
@@ -166,6 +198,9 @@ export function makeDecoder(sr, onComplete, onProgress) {
     const nb = new Float32Array(buf.length + chunk.length);
     nb.set(buf); nb.set(chunk, buf.length); buf = nb;
 
+    if (debugSink && buf.length >= toneN)
+      dbg({ t: "spectrum", sr, state, spectrum: spectrumAt(buf, buf.length - toneN, toneN, sr) });
+
     if (state === "search") {
       for (; scan + toneN <= buf.length; scan += hop) {
         const d = dominantBand(scan);
@@ -179,6 +214,7 @@ export function makeDecoder(sr, onComplete, onProgress) {
             let q = runStart;
             while (q + toneN < buf.length && goertzel(buf, q, toneN, runBand.marker, sr) < 0.85 * full) q += 64;
             state = "data"; band = runBand; dataStart = q + syncN + sgN; sym = 0; need = 0; nibs = [];
+            dbg({ t: "sync", band: band.name });
             break;
           }
         } else { runStart = -1; runBand = null; }
@@ -193,7 +229,9 @@ export function makeDecoder(sr, onComplete, onProgress) {
           const bytes = new Uint8Array(need / 2);
           for (let i = 0; i < bytes.length; i++) bytes[i] = (nibs[2 * i] << 4) | nibs[2 * i + 1];
           const len = bytes[0], body = bytes.subarray(0, 1 + len);
-          if (len > 0 && crc8(body) === bytes[1 + len]) { onComplete(bytes.subarray(1, 1 + len), band.name); }
+          const ok = len > 0 && crc8(body) === bytes[1 + len];
+          dbg({ t: "frame", ok, band: band.name, len, bytes: bytes.length });
+          if (ok) onComplete(bytes.subarray(1, 1 + len), band.name);
           reset();
           break;
         }
@@ -260,6 +298,121 @@ function stopRx() {
 }
 
 export function stopAudio() { stopTx(); stopRx(); }
+
+// ── Capability self-test (loopback) ─────────────────────────────────────────
+// Play a comb of every candidate tone through this device's own speaker while
+// recording its own mic, then measure received SNR per bin. Tells us (a) which
+// band this device can actually hear itself on and (b) whether it's loud enough.
+// It characterises THIS device's hardware — a good proxy for whether it can take
+// part in a band at all: if your own mic can't hear your own 17 kHz, it won't
+// hear the peer's either. Frequencies are fixed, so both ends stay compatible.
+const MIC = { echoCancellation: false, autoGainControl: false, noiseSuppression: false };
+const naptime = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+export type BandTest = { name: string; markerSnr: number; noteSnr: number[]; good: number; ok: boolean };
+export type SelfTest = { sampleRate: number; bands: BandTest[]; recommend: string; quiet: boolean };
+
+export async function selfTest(): Promise<SelfTest> {
+  const c = audioCtx();
+  await c.resume().catch(() => {});
+  const sr = c.sampleRate;
+  const P = bandFreqs();
+  const order = ["audible", "ultrasound"] as const;
+  const seq: number[] = [];
+  for (const b of order) seq.push(P[b].marker, ...P[b].notes);
+
+  const toneN = Math.round(0.07 * sr), gapN = Math.round(0.03 * sr), leadN = Math.round(0.3 * sr);
+  const data = new Float32Array(leadN + seq.length * (toneN + gapN) + Math.round(0.15 * sr));
+  let p = leadN;
+  for (const f of seq) { addTone(data, p, f, toneN, sr, { amp: 0.45, harm: f < 10000 ? 0.15 : 0 }); p += toneN + gapN; }
+
+  // Record from before playback so the lead-in captures the ambient noise floor.
+  const chunks: Float32Array[] = [];
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC });
+  const src = c.createMediaStreamSource(stream);
+  const node = c.createScriptProcessor(2048, 1, 1);
+  node.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  const mute = c.createGain(); mute.gain.value = 0;
+  src.connect(node); node.connect(mute); mute.connect(c.destination);
+
+  const buffer = c.createBuffer(1, data.length, sr);
+  buffer.getChannelData(0).set(data);
+  const bsrc = c.createBufferSource(); bsrc.buffer = buffer; bsrc.connect(c.destination);
+  await new Promise<void>((res) => { bsrc.onended = () => res(); bsrc.start(); });
+  await naptime(200);
+  node.onaudioprocess = null; src.disconnect(); node.disconnect(); mute.disconnect();
+  stream.getTracks().forEach((t) => t.stop());
+
+  let total = 0; for (const ch of chunks) total += ch.length;
+  const buf = new Float32Array(total);
+  { let o = 0; for (const ch of chunks) { buf.set(ch, o); o += ch.length; } }
+
+  const win = toneN, leadWin = Math.min(leadN, buf.length);
+  // Noise floor for a freq: mean Goertzel power over same-size windows in the
+  // silent lead-in — directly comparable to the signal peak below.
+  const floorOf = (f: number) => {
+    let sum = 0, cnt = 0;
+    for (let s = 0; s + win <= leadWin; s += win) { sum += goertzel(buf, s, win, f, sr); cnt++; }
+    return Math.max(cnt ? sum / cnt : 1e-12, 1e-12);
+  };
+  // Signal for a freq: the strongest window anywhere (the tone was emitted, so
+  // its peak ≈ how loudly it came back).
+  const peakOf = (f: number) => {
+    let best = 0;
+    for (let s = 0; s + win <= buf.length; s += Math.round(win / 2)) {
+      const g = goertzel(buf, s, win, f, sr); if (g > best) best = g;
+    }
+    return best;
+  };
+  const snrDb = (f: number) => 10 * Math.log10(peakOf(f) / floorOf(f));
+
+  const SNR_OK = 10;
+  const bands: BandTest[] = order.map((name) => {
+    const markerSnr = snrDb(P[name].marker);
+    const noteSnr = P[name].notes.map((f) => snrDb(f));
+    const good = noteSnr.filter((s) => s >= SNR_OK).length;
+    return { name, markerSnr, noteSnr, good, ok: markerSnr >= SNR_OK && good >= 14 };
+  });
+
+  const us = bands.find((b) => b.name === "ultrasound")!;
+  const aud = bands.find((b) => b.name === "audible")!;
+  const quiet = !aud.ok && aud.markerSnr < 6;   // can't even hear our own audible → muted / too quiet
+  const recommend = us.ok ? "ultrasound" : aud.ok ? "audible" : quiet ? "louder" : "audible";
+  const report: SelfTest = { sampleRate: sr, bands, recommend, quiet };
+  dbg({ t: "selftest", report });
+  return report;
+}
+
+// ── Live spectrum monitor (debug) ───────────────────────────────────────────
+// Opens the mic and streams per-bin Goertzel power to the debug sink, so you can
+// watch what a device picks up while it is NOT mid-pairing.
+let monNode: any = null, monSrc: any = null, monStream: MediaStream | null = null, monMute: any = null;
+export async function startMonitor() {
+  const c = audioCtx();
+  await c.resume().catch(() => {});
+  stopMonitor();
+  const sr = c.sampleRate, toneN = Math.round(TONE_MS / 1000 * sr);
+  monStream = await navigator.mediaDevices.getUserMedia({ audio: MIC });
+  monSrc = c.createMediaStreamSource(monStream);
+  monNode = c.createScriptProcessor(2048, 1, 1);
+  let buf = new Float32Array(0);
+  monNode.onaudioprocess = (e: any) => {
+    const chunk = new Float32Array(e.inputBuffer.getChannelData(0));
+    const nb = new Float32Array(Math.min(buf.length + chunk.length, toneN * 2));
+    const keep = nb.length - chunk.length;
+    if (keep > 0) nb.set(buf.subarray(buf.length - keep));
+    nb.set(chunk, Math.max(0, keep)); buf = nb;
+    if (buf.length >= toneN) dbg({ t: "spectrum", sr, state: "monitor", spectrum: spectrumAt(buf, buf.length - toneN, toneN, sr) });
+  };
+  monMute = c.createGain(); monMute.gain.value = 0;
+  monSrc.connect(monNode); monNode.connect(monMute); monMute.connect(c.destination);
+}
+export function stopMonitor() {
+  if (monNode) { monNode.onaudioprocess = null; try { monNode.disconnect(); } catch {} monNode = null; }
+  if (monSrc) { try { monSrc.disconnect(); } catch {} monSrc = null; }
+  if (monMute) { try { monMute.disconnect(); } catch {} monMute = null; }
+  if (monStream) { monStream.getTracks().forEach((t) => t.stop()); monStream = null; }
+}
 
 // ── Handshake primitives (used by the automatic ack-handshake) ──────────────
 // Frame type = first payload byte. Offer/answer carry the packed SDP after it;

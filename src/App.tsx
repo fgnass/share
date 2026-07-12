@@ -1,11 +1,22 @@
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import * as S from "./state";
 import * as P from "./pairing";
+import * as Music from "./music";
 import { install } from "./pwa";
 import { Icon, Qr, fmt } from "./ui";
 
 export function App() {
   const s = S.screen.value;
+  useEffect(() => {
+    if (!S.debug) return;
+    Music.setDebugSink((e: any) => {
+      if (e.t === "spectrum") { S.dbgSpectrum.value = e; S.dbgState.value = e.state; }
+      else if (e.t === "selftest") { S.dbgSelfTest.value = e.report; S.dbgPush(`self-test → ${e.report.recommend}${e.report.quiet ? " (quiet!)" : ""}`); }
+      else if (e.t === "sync") S.dbgPush(`sync locked · ${e.band}`);
+      else if (e.t === "frame") S.dbgPush(`frame ${e.ok ? "OK ✓" : "CRC FAIL ✗"} · ${e.band} · ${e.bytes}B`);
+    });
+    return () => Music.setDebugSink(null);
+  }, []);
   return (
     <main>
       {s === "choose" && <Choose />}
@@ -13,6 +24,7 @@ export function App() {
       {s === "pair" && <Pair />}
       {s === "handoff" && <Handoff />}
       {s === "room" && <Room />}
+      {S.debug && <DebugPanel />}
     </main>
   );
 }
@@ -137,7 +149,7 @@ function SoundPanel() {
           <select value={S.bandMode.value} onChange={(e) => (S.bandMode.value = (e.target as HTMLSelectElement).value as S.BandMode)}>
             <option value="auto">Auto (prefer ultrasound)</option>
             <option value="audible">Audible tones</option>
-            <option value="ultrasound">Ultrasound (~18–20 kHz)</option>
+            <option value="ultrasound">Ultrasound (~15.6–18 kHz)</option>
           </select>
         </label>
         <p class="hint">Auto picks whichever the two devices actually hear. Ultrasound is near-silent but some speakers and mics can't manage it.</p>
@@ -297,6 +309,79 @@ function Bubble({ m }: { m: S.Msg }) {
         {" · "}{fmt(m.size)}
       </div>
       {!m.done && <div class="bar"><i style={`width:${m.progress}%`} /></div>}
+    </div>
+  );
+}
+
+// ── Dev debug view (?debug) ──────────────────────────────────────────────────
+const FREQS = Music.bandFreqs();
+
+function SpecRow({ label, fr, d, max }: any) {
+  // Height on a dB scale: show the top 48 dB below the loudest bin on screen.
+  const bar = (v: number) => Math.max(0, Math.min(100, ((10 * Math.log10(v / max) + 48) / 48) * 100));
+  const peak = Math.max(d.marker, ...d.notes);
+  return (
+    <div class="specrow">
+      <span class="slbl">{label}</span>
+      <i class="sbar mk" style={`height:${bar(d.marker)}%`} title={`marker ${Math.round(fr.marker)}Hz`} />
+      {d.notes.map((v: number, i: number) => (
+        <i class={"sbar" + (v === peak ? " pk" : "")} style={`height:${bar(v)}%`} title={`${Math.round(fr.notes[i])}Hz`} />
+      ))}
+    </div>
+  );
+}
+
+function DebugPanel() {
+  const spec = S.dbgSpectrum.value;
+  const st = S.dbgSelfTest.value;
+  const log = S.dbgLog.value;
+  const mon = S.dbgMonitor.value;
+  const [busy, setBusy] = useState(false);
+
+  const runTest = async () => {
+    setBusy(true); S.dbgPush("running self-test…");
+    try { await Music.selfTest(); } catch (e) { S.dbgPush("self-test failed: " + e); }
+    setBusy(false);
+  };
+  const toggleMon = async () => {
+    if (mon) { Music.stopMonitor(); S.dbgMonitor.value = false; S.dbgPush("monitor off"); }
+    else { try { await Music.startMonitor(); S.dbgMonitor.value = true; S.dbgPush("monitor on"); } catch (e) { S.dbgPush("monitor failed: " + e); } }
+  };
+
+  const all = spec
+    ? [spec.spectrum.audible.marker, ...spec.spectrum.audible.notes, spec.spectrum.ultrasound.marker, ...spec.spectrum.ultrasound.notes]
+    : [];
+  const max = Math.max(1e-9, ...all);
+
+  return (
+    <div class="dbg">
+      <div class="dbghead">
+        <b>debug</b>
+        <span>{spec ? `${(spec.sr / 1000).toFixed(1)}kHz` : "—"} · {S.dbgState.value}</span>
+        <button onClick={runTest} disabled={busy}>{busy ? "testing…" : "self-test"}</button>
+        <button onClick={toggleMon}>{mon ? "monitor ⏹" : "monitor ▶"}</button>
+        <button onClick={() => (S.dbgLog.value = [])}>clear</button>
+      </div>
+      {spec && (
+        <div class="specwrap">
+          <SpecRow label="aud" fr={FREQS.audible} d={spec.spectrum.audible} max={max} />
+          <SpecRow label="ult" fr={FREQS.ultrasound} d={spec.spectrum.ultrasound} max={max} />
+        </div>
+      )}
+      {st && (
+        <div class="dbgtest">
+          {st.bands.map((b: any) => (
+            <div class="tband">
+              <span class={"tname " + (b.ok ? "ok" : "bad")}>{b.name} · {b.good}/16 · mk {b.markerSnr.toFixed(0)}dB</span>
+              <div class="tcells">
+                {b.noteSnr.map((s: number) => <i class={s >= 10 ? "g" : "b"} style={`height:${Math.max(6, Math.min(100, s * 3))}%`} title={s.toFixed(1) + "dB"} />)}
+              </div>
+            </div>
+          ))}
+          <span class="trec">→ <b>{st.recommend}</b>{st.quiet ? " (too quiet — turn up volume)" : ""}</span>
+        </div>
+      )}
+      <div class="dbglog">{log.map((l) => <div>{l}</div>)}</div>
     </div>
   );
 }
