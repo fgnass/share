@@ -613,13 +613,16 @@ export async function soundAuto() {
       if ((isAck(f) || isGot(f)) && ctlNonce(f!) !== myNonce) { peerNonce = ctlNonce(f!); matchBand(); }
       else if (isOffer(f)) { const code = codeOf(f!); if (code !== myCode) { matchBand(); peerNonce = peerNonceOf(code); onScan({ type: "o", code }); } }
       else if (isAnswer(f)) { const code = codeOf(f!); if (code !== myCode) { matchBand(); onScan({ type: "a", code }); } }
-      else { // silent → short nonce beacon
-        await sleep(rand(0, 300));
+      else if (Math.random() < 0.55) { // beacon only some rounds → breaks lockstep
+        // Two devices started together tend to beacon in sync and collide forever
+        // (their chirps overlap → neither syncs). Skipping the beacon ~45% of the
+        // time, plus the randomized listen window, desyncs them within a few rounds.
+        await sleep(rand(0, 400));
         if (!alive()) break;
         pickTxBand(ackTick++);
         slog("discover beacon");
         await playFrame(ackFrame(), { intro: false });
-      }
+      } else slog("discover listen-only round");
     }
     if (peerNonce !== null) slog(`role resolved: ${myNonce > peerNonce ? "OFFERER" : "answerer"} (peer ${peerNonce})`);
 
@@ -635,13 +638,13 @@ export async function soundAuto() {
         await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
         if (!alive()) break;
         setAudioStatus("Waiting for their reply…");
-        let rounds = 1; // extend once if we hear GOT (answer is on its way)
+        let rounds = 2; // a couple of shortish listens; extend if we hear GOT
         for (let i = 0; alive() && i < rounds; i++) {
-          const f = await listenFor(rand(7000, 3000));
+          const f = await listenFor(rand(3500, 2500));
           if (!alive()) break;
           slog("offerer heard", heardStr(f));
           if (isAnswer(f)) { const code = codeOf(f!); if (code !== myCode) { matchBand(); slog("→ onScan(answer)"); onScan({ type: "a", code }); } break; }
-          if (isGot(f) && ctlNonce(f!) !== myNonce) { rounds = 2; continue; }        // answer imminent → keep listening
+          if (isGot(f) && ctlNonce(f!) !== myNonce) { rounds = 4; continue; }        // answer imminent → keep listening
           if (isOffer(f)) { const code = codeOf(f!); if (code !== myCode) onScan({ type: "o", code }); } // both offered → tiebreak
         }
       } else if (role === "answerer" && isAnswer(myAudio)) {
@@ -655,14 +658,16 @@ export async function soundAuto() {
         await listenFor(rand(2500, 1500)); // brief listen; a re-heard offer means our answer missed → loop resends
       } else {
         // Designated answerer without the offer yet (or answer still building).
-        // Keep beaconing our nonce — the offerer may still be in discovery and
-        // needs to hear us before it starts sending the offer — then listen for
-        // the offer; onScan → becomeAnswerer builds the answer.
+        // Mostly listen for the offer (our own beacon would clobber the offer's
+        // chirp). Beacon only occasionally — just enough that an offerer still in
+        // discovery can hear us — otherwise stay quiet and catch the offer.
         setAudioStatus("Waiting for their code…");
-        pickTxBand(ackTick++);
-        slog("answerer beacon + listen");
-        await playFrame(ackFrame(), { intro: false });
-        if (!alive()) break;
+        if (Math.random() < 0.3) {
+          pickTxBand(ackTick++);
+          slog("answerer beacon");
+          await playFrame(ackFrame(), { intro: false });
+          if (!alive()) break;
+        }
         const f = await listenFor(rand(6000, 3000));
         if (!alive()) break;
         slog("answerer heard", heardStr(f));
