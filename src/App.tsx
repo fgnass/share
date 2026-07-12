@@ -188,8 +188,19 @@ function Room() {
   const logRef = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const fileEl = useRef<HTMLInputElement>(null);
+  const folderEl = useRef<HTMLInputElement>(null);
   const msgs = S.messages.value;
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [msgs]);
+
+  // Drag & drop files or whole folders onto the room.
+  const onDrop = async (e: DragEvent) => {
+    e.preventDefault(); S.dragging.value = false;
+    if (e.dataTransfer) P.sendFiles(await P.fromDataTransfer(e.dataTransfer));
+  };
+  const onDragOver = (e: DragEvent) => {
+    if (!e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault(); S.dragging.value = true;
+  };
 
   const send = () => {
     const t = input.current?.value || "";
@@ -200,19 +211,37 @@ function Room() {
     el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 120) + "px";
   };
   return (
-    <section id="room" class="card">
+    <section id="room" class={"card" + (S.dragging.value ? " dropping" : "")}
+             onDragOver={onDragOver}
+             onDragLeave={(e) => { if (e.currentTarget === e.target) S.dragging.value = false; }}
+             onDrop={onDrop}>
+      {S.dragging.value && <div class="dropzone"><Icon name="folder-down" />Drop files or a folder to send</div>}
       <div class="roomhead">
         <span id="roomDot" class={"dot " + (rs.ok ? "ok" : "err")} />
         <span id="roomStatus">{rs.text}</span>
         {rs.showReconnect && <button id="reconnect" class="ghost" onClick={P.reconnect}>Reconnect</button>}
+        {S.canSaveToDir && (
+          S.saveDirName.value
+            ? <button class="ghost savedir set" title="Change folder" onClick={P.pickSaveDir}>
+                <Icon name="folder-check" />{S.saveDirName.value}
+                <span class="x" title="Save to Downloads instead"
+                      onClick={(e) => { e.stopPropagation(); P.clearSaveDir(); }}><Icon name="x" /></span>
+              </button>
+            : <button class="ghost savedir" title="Save incoming files straight to a folder" onClick={P.pickSaveDir}>
+                <Icon name="folder-down" />Save to folder…
+              </button>
+        )}
       </div>
       <div id="log" ref={logRef}>
         {msgs.map((m) => <Bubble key={m.id} m={m} />)}
       </div>
       <div class="composer">
-        <button class="iconbtn ghost" title="Send file" onClick={() => fileEl.current?.click()}><Icon name="paperclip" /></button>
+        <button class="iconbtn ghost" title="Send files" onClick={() => fileEl.current?.click()}><Icon name="paperclip" /></button>
         <input ref={fileEl} type="file" multiple hidden
-               onChange={(e) => { const t = e.target as HTMLInputElement; P.sendFiles([...(t.files || [])]); t.value = ""; }} />
+               onChange={(e) => { const t = e.target as HTMLInputElement; P.sendFiles(P.fromFileList(t.files)); t.value = ""; }} />
+        <button class="iconbtn ghost" title="Send a folder" onClick={() => folderEl.current?.click()}><Icon name="folder-up" /></button>
+        <input ref={folderEl} type="file" hidden {...({ webkitdirectory: "" } as any)}
+               onChange={(e) => { const t = e.target as HTMLInputElement; P.sendFiles(P.fromFileList(t.files)); t.value = ""; }} />
         <textarea ref={input} rows={1} placeholder="Message…" onInput={grow}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
         <button class="iconbtn" title="Send" onClick={send}><Icon name="send" /></button>
@@ -232,9 +261,29 @@ async function shareFile(f: File) { try { await navigator.share({ files: [f] });
 function Bubble({ m }: { m: S.Msg }) {
   if (m.kind === "sys") return <div class="msg sys">{m.text}</div>;
   if (m.kind === "chat") return <div class={"msg " + (m.mine ? "mine" : "their")}>{m.text}</div>;
+  if (m.kind === "batch") {
+    const stat = m.done
+      ? m.error ? "Some files failed"
+        : m.savedTo ? <span class="saved"><Icon name="folder-check" />Saved to {m.savedTo}</span>
+        : m.mine ? "Sent" : "Received"
+      : (m.mine ? "Sending…" : "Receiving…");
+    return (
+      <div class={"msg " + (m.mine ? "mine" : "their")}>
+        <div class="fname"><Icon name="folder" />{m.name}</div>
+        <div class="fmeta">
+          <span class="stat">{stat}</span>
+          {" · "}{m.doneCount}/{m.count} files · {fmt(m.size)}
+        </div>
+        {!m.done && <div class="bar"><i style={`width:${m.progress}%`} /></div>}
+      </div>
+    );
+  }
   // file
   const stat = m.done
-    ? (m.url ? <a href={m.url} download={m.name}><Icon name="download" />Download</a> : "Sent")
+    ? m.error ? "Save failed"
+      : m.savedTo ? <span class="saved"><Icon name="folder-check" />Saved to {m.savedTo}</span>
+      : m.url ? <a href={m.url} download={m.name}><Icon name="download" />Download</a>
+      : "Sent"
     : (m.mine ? "Sending…" : "Receiving…");
   // On Android, Share/Open hands the file to the OS sheet — handier than digging
   // through Downloads (e.g. to install a received APK).

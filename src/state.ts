@@ -7,7 +7,8 @@ export type BandMode = "auto" | "audible" | "ultrasound";
 export type Msg =
   | { id: number; kind: "sys"; text: string }
   | { id: number; kind: "chat"; mine: boolean; text: string }
-  | { id: number; kind: "file"; mine: boolean; name: string; size: number; progress: number; url?: string; file?: File; done: boolean };
+  | { id: number; kind: "file"; mine: boolean; name: string; size: number; progress: number; url?: string; file?: File; done: boolean; savedTo?: string; error?: boolean }
+  | { id: number; kind: "batch"; mine: boolean; name: string; count: number; doneCount: number; size: number; progress: number; done: boolean; savedTo?: string; error?: boolean };
 
 export const screen = signal<Screen>("choose");
 export const method = signal<Method>("camera");
@@ -38,6 +39,14 @@ export const handoff = signal<{ title: string; text: string; fallback: boolean; 
 );
 
 // Room
+// Optional: stream incoming files straight into a chosen folder instead of
+// buffering the whole file in RAM and downloading it (File System Access API,
+// Chromium only). Picking the folder is the one user gesture the save needs.
+export const canSaveToDir = typeof (globalThis as any).showDirectoryPicker === "function";
+export const saveDir = signal<any>(null);   // FileSystemDirectoryHandle | null
+export const saveDirName = signal("");
+export const dragging = signal(false);       // a file/folder is being dragged over the room
+
 export const roomStatus = signal<{ text: string; ok: boolean; showReconnect: boolean }>(
   { text: "Connected", ok: true, showReconnect: false },
 );

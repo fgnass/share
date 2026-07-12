@@ -126,29 +126,87 @@ function armPairWatch() {
 }
 
 // ── DataChannel: chat + files ──
+// An incoming file is either streamed straight to disk (a folder was picked, so
+// `writable` is set and chunks never accumulate) or buffered in RAM as `chunks`
+// and offered as a download. `writeQ` serialises the async disk writes and keeps
+// them ordered behind the (also async) createWritable().
+type Incoming = {
+  name: string; path: string; size: number; mime: string; got: number; id: number;
+  grouped: boolean;          // part of a batch → progress rolls up into the batch bubble
+  chunks?: ArrayBuffer[];
+  writable?: any;            // FileSystemWritableFileStream
+  writeQ: Promise<void>;
+};
+// A batch (multi-file / folder send) rolls up into one bubble. We only group on
+// the receiver when streaming to a folder — without one, each file falls back to
+// its own download bubble (grouping N download links helps nobody).
+type Batch = { id: number; count: number; done: number; size: number; got: number; errors: number };
+
+// Reject ".."/"." segments so a peer-supplied path can't escape the chosen
+// folder (getDirectoryHandle would throw on them anyway, but be explicit).
+function relParts(path: string) {
+  return path.split("/").map((s) => s.trim()).filter((s) => s && s !== "." && s !== "..");
+}
+async function openWritable(dir: any, path: string): Promise<any> {
+  const parts = relParts(path);
+  const name = parts.pop()!;
+  let d = dir;
+  for (const seg of parts) d = await d.getDirectoryHandle(seg, { create: true });
+  const fh = await d.getFileHandle(name, { create: true });
+  return fh.createWritable();
+}
+
 function setupChannel(ch: RTCDataChannel) {
   channel = ch;
   ch.binaryType = "arraybuffer";
-  let inc: { name: string; size: number; mime: string; chunks: ArrayBuffer[]; got: number; id: number } | null = null;
+  let inc: Incoming | null = null;
+  let batch: Batch | null = null;
   ch.onopen = enterRoom;
   ch.onclose = markLost;
   ch.onerror = markLost;
+
+  const finish = (i: Incoming) => finalize(i, batch, () => { batch = null; });
+
   ch.onmessage = (e) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data);
       if (m.k === "chat") { S.pushMsg({ id: S.nextId(), kind: "chat", mine: false, text: m.t }); return; }
+      if (m.k === "batch") {
+        // Group only when we can stream into a folder; otherwise ignore the
+        // header and let each file arrive as its own bubble (RAM fallback).
+        if (S.saveDir.value) {
+          const id = S.nextId();
+          S.pushMsg({ id, kind: "batch", mine: false, name: m.n, count: m.c, doneCount: 0, size: m.s, progress: 0, done: false });
+          batch = { id, count: m.c, done: 0, size: m.s, got: 0, errors: 0 };
+        } else batch = null;
+        return;
+      }
       if (m.k === "file") {
-        const id = S.nextId();
-        S.pushMsg({ id, kind: "file", mine: false, name: m.n, size: m.s, progress: 0, done: false });
-        inc = { name: m.n, size: m.s, mime: m.m, chunks: [], got: 0, id };
-        if (m.s === 0) { finalize(inc); inc = null; }
+        const dir = S.saveDir.value;
+        const path = m.p || m.n;
+        const grouped = !!batch;
+        const id = grouped ? batch!.id : S.nextId();
+        if (!grouped) S.pushMsg({ id, kind: "file", mine: false, name: m.n, size: m.s, progress: 0, done: false });
+        inc = { name: m.n, path, size: m.s, mime: m.m, got: 0, id, grouped, writeQ: Promise.resolve() };
+        // Stream to disk when a folder is set; else buffer in RAM. Open the
+        // target up front so every write chains after it, ordered.
+        if (dir) inc.writeQ = openWritable(dir, path).then((w) => { inc!.writable = w; });
+        else inc.chunks = [];
+        if (m.s === 0) { finish(inc); inc = null; }
       }
       return;
     }
     if (!inc) return;
-    inc.chunks.push(e.data); inc.got += e.data.byteLength;
-    S.updateMsg(inc.id, { progress: (inc.got / inc.size) * 100 });
-    if (inc.got >= inc.size) { finalize(inc); inc = null; }
+    // Capture the current file object: the disk write runs as a later microtask,
+    // by which point the outer `inc` may be null or the next file — the closure
+    // must not read `writable` through the mutable `inc`.
+    const cur = inc, chunk = e.data;
+    cur.got += chunk.byteLength;
+    if (cur.chunks) cur.chunks.push(chunk);
+    else cur.writeQ = cur.writeQ.then(() => cur.writable.write(chunk));
+    if (cur.grouped && batch) { batch.got += chunk.byteLength; S.updateMsg(batch.id, { progress: batch.size ? (batch.got / batch.size) * 100 : 0 }); }
+    else S.updateMsg(cur.id, { progress: (cur.got / cur.size) * 100 });
+    if (cur.got >= cur.size) { finish(cur); inc = null; }
   };
 }
 // Some senders report no (or a generic) MIME type; fill it in from the file
@@ -165,9 +223,38 @@ function resolveMime(name: string, given: string): string {
   const ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
   return EXT_MIME[ext] || given || "application/octet-stream";
 }
-function finalize(inc: { chunks: ArrayBuffer[]; mime: string; id: number; name: string }) {
-  const file = new File(inc.chunks, inc.name, { type: resolveMime(inc.name, inc.mime) });
-  S.updateMsg(inc.id, { done: true, url: URL.createObjectURL(file), file, progress: 100 });
+async function finalize(inc: Incoming, batch: Batch | null, closeBatch: () => void) {
+  let file: File | undefined, url: string | undefined, error = false;
+  try {
+    if (inc.chunks) {
+      // Flatten the relative path into the download name so files from different
+      // subfolders don't collide in a flat Downloads folder.
+      const dl = inc.path !== inc.name ? inc.path.replace(/\//g, "_") : inc.name;
+      file = new File(inc.chunks, dl, { type: resolveMime(inc.name, inc.mime) });
+      url = URL.createObjectURL(file);
+    } else {
+      await inc.writeQ;
+      await inc.writable.close();
+    }
+  } catch (e) {
+    console.error(e);
+    try { await inc.writable?.abort(); } catch {}
+    error = true;
+  }
+
+  if (inc.grouped && batch) {
+    batch.done++;
+    if (error) batch.errors++;
+    S.updateMsg(batch.id, { doneCount: batch.done });
+    if (batch.done >= batch.count) {
+      S.updateMsg(batch.id, { done: true, progress: 100, savedTo: S.saveDirName.value, error: batch.errors > 0 });
+      closeBatch();
+    }
+    return;
+  }
+  if (error) S.updateMsg(inc.id, { done: true, error: true });
+  else if (inc.chunks) S.updateMsg(inc.id, { done: true, url, file, progress: 100 });
+  else S.updateMsg(inc.id, { done: true, savedTo: S.saveDirName.value, progress: 100 });
 }
 
 function enterRoom() {
@@ -187,19 +274,85 @@ export function sendMessage(text: string) {
   S.pushMsg({ id: S.nextId(), kind: "chat", mine: true, text: t });
   return true;
 }
-export function sendFiles(files: File[]) {
-  for (const f of files) sendQ = sendQ.then(() => sendOne(f)).catch((e) => { console.error(e); markLost(); });
+// One item to send: the File plus its relative path (equal to the name for a
+// loose file; "folder/sub/file" for a picked/dropped folder).
+export type Upload = { file: File; path: string };
+
+// Normalise a FileList (from a <input multiple> or <input webkitdirectory>).
+// webkitRelativePath carries the folder structure when a directory was picked.
+export const fromFileList = (list: FileList | File[] | null): Upload[] =>
+  [...(list || [])].map((f) => ({ file: f, path: (f as any).webkitRelativePath || f.name }));
+
+// Walk a dropped DataTransfer, recursing into folders via the entries API so a
+// dropped directory keeps its structure. Falls back to the flat file list when
+// entries aren't exposed.
+export async function fromDataTransfer(dt: DataTransfer): Promise<Upload[]> {
+  const roots = [...dt.items].map((it) => (it as any).webkitGetAsEntry?.()).filter(Boolean);
+  if (!roots.length) return fromFileList(dt.files);
+  const out: Upload[] = [];
+  const walk = async (entry: any, prefix: string): Promise<void> => {
+    if (entry.isFile) {
+      const file: File = await new Promise((res, rej) => entry.file(res, rej));
+      out.push({ file, path: prefix + entry.name });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const dir = prefix + entry.name + "/";
+      for (;;) {
+        const batch: any[] = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const e of batch) await walk(e, dir);
+      }
+    }
+  };
+  for (const r of roots) await walk(r, "");
+  return out;
 }
-async function sendOne(file: File) {
+
+// Name the batch bubble after the common top-level folder, else "N files".
+function batchLabel(items: Upload[]): string {
+  const tops = new Set(items.map((i) => (i.path.includes("/") ? i.path.split("/")[0] : "")));
+  const only = tops.size === 1 ? [...tops][0] : "";
+  return only || items.length + " files";
+}
+
+export function sendFiles(items: Upload[]) {
+  if (!items.length) return;
+  const grouped = items.length > 1 || items.some((i) => i.path.includes("/"));
+  const task = () => (grouped ? sendBatch(items) : sendSingle(items[0]));
+  sendQ = sendQ.then(task).catch((e) => { console.error(e); markLost(); });
+}
+
+async function sendSingle(it: Upload) {
   if (!channel || channel.readyState !== "open") { markLost(); return; }
   const id = S.nextId();
-  S.pushMsg({ id, kind: "file", mine: true, name: file.name, size: file.size, progress: 0, done: false });
-  channel.send(JSON.stringify({ k: "file", n: file.name, s: file.size, m: file.type }));
+  S.pushMsg({ id, kind: "file", mine: true, name: it.file.name, size: it.file.size, progress: 0, done: false });
   let sent = 0;
+  await sendFile(it, (n) => { sent += n; S.updateMsg(id, { progress: (sent / (it.file.size || 1)) * 100 }); });
+  S.updateMsg(id, { done: true }); // sent (no download link on the sender)
+}
+
+async function sendBatch(items: Upload[]) {
+  if (!channel || channel.readyState !== "open") { markLost(); return; }
+  const total = items.reduce((n, i) => n + i.file.size, 0);
+  const id = S.nextId();
+  S.pushMsg({ id, kind: "batch", mine: true, name: batchLabel(items), count: items.length, doneCount: 0, size: total, progress: 0, done: false });
+  channel.send(JSON.stringify({ k: "batch", n: batchLabel(items), c: items.length, s: total }));
+  let bytes = 0, done = 0;
+  for (const it of items) {
+    await sendFile(it, (n) => { bytes += n; S.updateMsg(id, { progress: total ? (bytes / total) * 100 : 100 }); });
+    S.updateMsg(id, { doneCount: ++done });
+  }
+  S.updateMsg(id, { done: true, progress: 100 });
+}
+
+async function sendFile(it: Upload, onProgress: (n: number) => void) {
+  if (!channel || channel.readyState !== "open") throw new Error("channel closed");
+  const { file, path } = it;
+  const rel = path !== file.name ? path : undefined; // omit for loose files
+  channel.send(JSON.stringify({ k: "file", n: file.name, s: file.size, m: file.type, p: rel }));
   for (let off = 0; off < file.size; off += CHUNK) {
     const buf = await file.slice(off, off + CHUNK).arrayBuffer();
-    channel.send(buf); sent += buf.byteLength;
-    S.updateMsg(id, { progress: (sent / file.size) * 100 });
+    channel.send(buf); onProgress(buf.byteLength);
     if (channel.bufferedAmount > HIGH_WATER) {
       await new Promise<void>((res) => {
         channel!.bufferedAmountLowThreshold = LOW_WATER;
@@ -207,8 +360,18 @@ async function sendOne(file: File) {
       });
     }
   }
-  S.updateMsg(id, { done: true }); // sent (no download link on the sender)
 }
+// Pick a folder to stream incoming files into (one gesture covers every file
+// that follows). Requires the File System Access API — see S.canSaveToDir.
+export async function pickSaveDir() {
+  try {
+    const dir = await (globalThis as any).showDirectoryPicker({ mode: "readwrite" });
+    S.saveDir.value = dir;
+    S.saveDirName.value = dir.name;
+  } catch { /* cancelled */ }
+}
+export function clearSaveDir() { S.saveDir.value = null; S.saveDirName.value = ""; }
+
 export const reconnect = () => location.replace(location.origin + location.pathname);
 
 // ── Present the right pieces for the chosen method / role ──

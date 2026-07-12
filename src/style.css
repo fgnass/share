@@ -324,13 +324,32 @@ a { color: var(--accent); }
 .stunprompt button { width: 100%; }
 
 /* ── Chat room ── */
-#room { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+#room { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; overflow: hidden; position: relative; }
+#room.dropping { outline: 2px dashed var(--accent); outline-offset: -8px; }
+.dropzone {
+  position: absolute; inset: 0; z-index: 5; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  color: var(--accent); font-weight: 700; letter-spacing: 0.04em;
+}
+.dropzone svg { width: 40px; height: 40px; }
 .roomhead {
   display: flex; align-items: center; gap: 9px; padding: 14px 18px;
   border-bottom: 1px solid var(--border);
   font-size: 0.72rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted);
 }
 .roomhead #reconnect { margin-left: auto; padding: 6px 12px; font-size: 0.72rem; letter-spacing: 0.08em; }
+.roomhead .savedir {
+  margin-left: auto; width: auto; display: inline-flex; align-items: center; gap: 6px;
+  max-width: 55%; padding: 6px 12px; font-size: 0.72rem; letter-spacing: 0.06em; text-transform: none;
+}
+.roomhead .savedir svg { width: 14px; height: 14px; flex: none; }
+.roomhead .savedir.set { overflow: hidden; }
+.roomhead .savedir.set > :not(svg):not(.x) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roomhead .savedir .x { display: inline-flex; margin-left: 2px; opacity: 0.6; }
+.roomhead .savedir .x:hover { opacity: 1; }
+.msg .fmeta .saved { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; }
+.msg .fmeta .saved svg { width: 14px; height: 14px; }
 #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 9px; }
 .msg {
   max-width: 82%; padding: 9px 13px; border-radius: 16px; font-size: 0.9rem; line-height: 1.45;
