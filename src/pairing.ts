@@ -553,7 +553,7 @@ export function retryWithStun() {
 // A device alone still only emits short ACK beacons (never its code) until it
 // hears a peer. Role/tiebreak/recovery run through onScan (shared with QR).
 const LISTEN_MIN = 12000, LISTEN_SPAN = 8000; // randomized listen window (12–20 s), catches one full RS-coded frame
-let autoRunning = false, bandMatched = false, bandGuess = false, volumeLow = false, ackTick = 0;
+let autoRunning = false, bandMatched = false, bandGuess = false, volumeLow = false, heardPeer = false, ackTick = 0;
 
 const setAudioStatus = (t: string) => (S.audioStatus.value = t);
 const setProgress = (f: number | null) => (S.audioProgress.value = f);
@@ -578,7 +578,7 @@ function pickTxBand(i: number) { if (S.bandMode.value === "auto" && !bandMatched
 export async function soundAuto() {
   if (autoRunning) return;
   autoRunning = true; resetAuto(); soundBusyUI(true);
-  bandMatched = false; bandGuess = false; volumeLow = false; ackTick = 0;
+  bandMatched = false; bandGuess = false; volumeLow = false; heardPeer = false; ackTick = 0;
   slog("soundAuto start", { role, myNonce, band: S.bandMode.value, loopback: S.loopbackMode });
   if (S.loopbackMode) {
     bandMatched = true; // no bands over the loopback channel
@@ -612,37 +612,48 @@ export async function soundAuto() {
         // Peer announced presence → hand them our current code, once, if the
         // channel is clear. (Both hearing each other and both sending collides at
         // most once; RS/CRC reject it and the randomized re-listen desyncs them.)
-        matchBand();
+        heardPeer = true; matchBand();
         const busy = await senseBusy();
         slog("peer ACK → send our code", { kind: isOffer(myAudio) ? "offer" : isAnswer(myAudio) ? "answer" : "?", bytes: myAudio?.length, busy });
-        if (!busy) {
+        if (!busy && !applied) {
           setAudioStatus("Sending your code…"); setProgress(0);
           await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
         }
         continue;
       }
       if (isAnswer(f)) {
+        heardPeer = true;
         const code = codeOf(f!);
         if (code !== myCode) { matchBand(); setAudioStatus("Got their reply — connecting…"); slog("→ onScan(answer)"); onScan({ type: "a", code }); }
         continue;
       }
       if (isOffer(f)) {
+        heardPeer = true;
         const code = codeOf(f!);
         if (code !== myCode) { matchBand(); slog("→ onScan(offer)"); onScan({ type: "o", code }); }
         else slog("ignored own offer echo");
         continue;
       }
 
-      // Silent window → announce presence with a short ACK beacon. Extra jitter +
-      // carrier sense so two simultaneously-idle devices don't beacon in lockstep.
+      // Silent window → transmit. Once we've heard a peer we KNOW someone's there,
+      // so push our actual code (offer/answer) instead of waiting to catch their
+      // ACK — this is what removes the wasted rounds. Alone (never heard a peer) we
+      // only emit a short presence beacon, never blast the code into an empty room.
+      // Jitter + carrier sense keep two devices from transmitting in lockstep.
       await sleep(rand(0, 500));
-      if (!alive() || (await senseBusy())) { slog("beacon skipped (busy/dead)"); continue; }
+      if (!alive() || (await senseBusy())) { slog("tx skipped (busy/dead)"); continue; }
       if (!alive()) break;
       pickTxBand(ackTick++);
-      setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself."
-        : role === "answerer" ? "Ready — waiting for their go-ahead…" : "Looking for the other device…");
-      slog(`beacon ACK (tick ${ackTick})`);
-      await playFrame(ackFrame(), { intro: ackTick % 3 === 0 });
+      if (heardPeer && myAudio && !applied) {
+        setAudioStatus("Sending your code…"); setProgress(0);
+        slog(`push code (${isOffer(myAudio) ? "offer" : "answer"}, tick ${ackTick})`);
+        await playFrame(myAudio, { intro: false, onprogress: setProgress }); setProgress(null);
+      } else {
+        setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself."
+          : role === "answerer" ? "Ready — waiting for their go-ahead…" : "Looking for the other device…");
+        slog(`beacon ACK (tick ${ackTick})`);
+        await playFrame(ackFrame(), { intro: ackTick % 3 === 0 });
+      }
     }
   } catch { setAudioStatus("Audio/mic unavailable on this device."); }
   autoRunning = false; soundBusyUI(false);
