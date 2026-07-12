@@ -66,7 +66,7 @@ function How() {
           <li><b>Link:</b> send the code as a link over any chat, then paste the reply the other device sends back. Works between any two devices, anywhere.</li>
         </ul>
         <p><b>Direct and private.</b> Messages and files travel straight between the two devices over an encrypted connection. Nothing is uploaded, stored, or seen by any server.</p>
-        <p><b>Your network stays yours.</b> On the same Wi-Fi nothing external is contacted at all. To connect across different networks you can turn on a STUN server, which only helps the devices find each other; your data never passes through it.</p>
+        <p><b>Your network stays yours.</b> On the same Wi-Fi nothing external is contacted at all. If the two devices are on different networks and can't reach each other directly, the app offers to retry via a STUN server, which only helps the devices find each other; your data never passes through it.</p>
         <p><b>Open source.</b> The whole app is a small static site with no backend, built from plain Preact and TypeScript. Host it anywhere, or read every line of its source.</p>
         <p><b>Works offline.</b> Save it to your home screen and it launches like an app even with no connection, since pairing itself needs no server.</p>
       </div>
@@ -92,10 +92,12 @@ function Pair() {
               <span id="pairStatus">{S.pairStatus.value.text}</span>
             </div>
           )}
-          <label class="toggle">
-            <input type="checkbox" checked={S.useStun.value} onChange={(e) => P.toggleStun((e.target as HTMLInputElement).checked)} />
-            <span>Connect across networks<em>Off = same network only, no server contact. On uses a STUN server (reveals your public IP to it). Both devices must enable it.</em></span>
-          </label>
+          {S.stunPrompt.value && (
+            <div class="stunprompt">
+              <p>Couldn't connect directly — the devices may be on different networks. Retry using a STUN server to help them find each other? It only relays their addresses; your data still goes straight between them.</p>
+              <button onClick={P.retryWithStun}>Retry across networks</button>
+            </div>
+          )}
           <button id="switchMethod" class="ghost" onClick={P.switchMethod}><Icon name="switch" />Use a different method</button>
         </div>
       </div>

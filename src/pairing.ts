@@ -104,6 +104,27 @@ function reflectConn() {
 }
 function wireConn(p: RTCPeerConnection) { p.onconnectionstatechange = reflectConn; p.oniceconnectionstatechange = reflectConn; }
 
+// ── Direct-connection watchdog (pairing phase) ──
+// Once both descriptions are exchanged, a real connection attempt is underway.
+// On the same LAN this succeeds in well under a second; if it hasn't connected
+// after a while the two devices are likely on different networks and need STUN
+// to find each other. Only the offerer arms this (it applies the answer, so it
+// knows the exchange completed) and it drives the escalation for both — the peer
+// adopts STUN on its own by spotting the reflexive candidate in the new offer.
+let pairTimer: ReturnType<typeof setTimeout> | null = null;
+function clearPairWatch() { if (pairTimer) { clearTimeout(pairTimer); pairTimer = null; } }
+function armPairWatch() {
+  clearPairWatch();
+  pairTimer = setTimeout(() => {
+    pairTimer = null;
+    if (entered) return;
+    const st = connState();
+    if (st === "connected" || st === "completed") return;
+    if (!S.useStun.value) S.stunPrompt.value = true;            // offer to retry with STUN
+    else setStatus("Still couldn't connect. The networks may block direct links.", "err");
+  }, 9000);
+}
+
 // ── DataChannel: chat + files ──
 function setupChannel(ch: RTCDataChannel) {
   channel = ch;
@@ -152,7 +173,7 @@ function finalize(inc: { chunks: ArrayBuffer[]; mime: string; id: number; name: 
 function enterRoom() {
   if (entered) return; entered = true;
   autoRunning = false; stopCamera(); stopAudio();
-  clearGrace(); setRoom("Connected", true, false);
+  clearGrace(); clearPairWatch(); S.stunPrompt.value = false; setRoom("Connected", true, false);
   S.screen.value = "room";
   S.pushMsg({ id: S.nextId(), kind: "sys", text: "Connected. Say hi" });
 }
@@ -205,6 +226,7 @@ export async function startOfferer(m: S.Method) {
 }
 async function mintOffer() {
   try { pc?.close(); } catch {}
+  clearPairWatch();
   applied = false; entered = false; channel = null;
   pc = new RTCPeerConnection(rtcConfig());
   wireConn(pc);
@@ -229,6 +251,7 @@ async function applyAnswer(sdp: RTCSessionDescriptionInit) {
   if (applied) return; applied = true; committed = true;
   await pc!.setRemoteDescription(sdp);
   setStatus("Connecting…");
+  armPairWatch();
 }
 
 // ── Answerer ──
@@ -250,6 +273,7 @@ async function becomeAnswerer(code: string) {
 }
 async function buildAnswer(code: string) {
   try { pc?.close(); } catch {}
+  clearPairWatch();
   entered = false; channel = null;
   pc = new RTCPeerConnection(rtcConfig());
   wireConn(pc);
@@ -273,6 +297,14 @@ function onScan(parsed: { type: string; code: string }, manual = false) {
   if (parsed.code === myCode) return;      // our own reflection
   let dec;
   try { dec = decode(parsed.code); } catch { return; }
+  // STUN propagation: a peer's code carrying a reflexive (srflx) candidate means
+  // it turned STUN on. A one-sided srflx rarely connects, so we adopt it too and
+  // regenerate our side with STUN — which then carries srflx to them in turn.
+  if (!S.useStun.value && dec.sdp.includes("typ srflx")) {
+    S.useStun.value = true; S.stunPrompt.value = false; handled.clear();
+    if (role === "offerer") { mintOffer(); return; } // re-mint so our offer has srflx too
+    // answerer: fall through — becomeAnswerer below rebuilds the answer with STUN on.
+  }
   if (parsed.type === "a") {               // an answer
     if (role === "offerer" && !applied) applyAnswer(dec as any);
     else if (role === "answerer" && !applied && !entered && myNonce > dec.nonce) {
@@ -334,10 +366,14 @@ export async function share(url: string) {
   try { if (navigator.share) return await navigator.share({ url, title: "share.gnass.buzz" }); } catch {}
   try { await navigator.clipboard.writeText(url); alert("Link copied"); } catch {}
 }
-export function toggleStun(on: boolean) {
-  S.useStun.value = on; localStorage.setItem("useStun", on ? "1" : "0");
-  handled.clear();
-  role === "answerer" ? buildAnswer(lastOfferCode!) : mintOffer();
+// User confirmed the "retry across networks" prompt: turn STUN on and regenerate
+// our current code. It now carries a reflexive candidate, so the peer adopts STUN
+// automatically (see onScan) and both ends end up gathering one.
+export function retryWithStun() {
+  S.stunPrompt.value = false;
+  if (S.useStun.value) return;
+  S.useStun.value = true; handled.clear();
+  role === "answerer" && lastOfferCode ? buildAnswer(lastOfferCode) : mintOffer();
 }
 
 // ── Automatic sound pairing: ACK-gated, half-duplex code exchange ──

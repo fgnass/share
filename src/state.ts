@@ -26,7 +26,11 @@ export const audioBusy = signal(false);
 export const audioProgress = signal<number | null>(null); // 0..1 or null
 export const bandMode = signal<BandMode>("auto");
 
-export const useStun = signal(localStorage.getItem("useStun") === "1");
+// STUN is off by default (same-network pairing contacts nothing external). It is
+// turned on automatically when a direct attempt fails and the user confirms, or
+// when the peer's code shows it already uses STUN — no manual checkbox, no persist.
+export const useStun = signal(false);
+export const stunPrompt = signal(false);   // "couldn't connect directly — retry across networks?"
 
 // Handoff (#a=)
 export const handoff = signal<{ title: string; text: string; fallback: boolean; blob: string }>(

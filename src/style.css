@@ -318,10 +318,10 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .hidden { display: none !important; }
 a { color: var(--accent); }
 
-/* ── Across-networks toggle ── */
-.toggle { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; cursor: pointer; font-size: 0.85rem; font-weight: 600; }
-.toggle input { margin-top: 2px; flex: none; width: 17px; height: 17px; accent-color: var(--accent); }
-.toggle em { display: block; color: var(--muted); font-size: 0.75rem; font-weight: 500; font-style: normal; margin-top: 3px; line-height: 1.45; }
+/* ── Retry-across-networks prompt ── */
+.stunprompt { margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); }
+.stunprompt p { margin: 0 0 12px; font-size: 0.8rem; line-height: 1.5; }
+.stunprompt button { width: 100%; }
 
 /* ── Chat room ── */
 #room { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
