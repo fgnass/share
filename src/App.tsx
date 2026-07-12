@@ -12,12 +12,13 @@ export function App() {
   // mid-pairing (which suspends the tab and kills the sound loop).
   useEffect(() => { keepAwake(s === "pair" || s === "handoff" || s === "room"); }, [s]);
   useEffect(() => {
+    if (S.loopbackMode) Music.setLoopback(true);
     if (!S.debug) return;
     Music.setDebugSink((e: any) => {
       if (e.t === "spectrum") { S.dbgSpectrum.value = e; S.dbgState.value = e.state; }
-      else if (e.t === "selftest") { S.dbgSelfTest.value = e.report; S.dbgPush(`self-test → ${e.report.recommend}${e.report.quiet ? " (quiet!)" : ""}`); }
-      else if (e.t === "sync") S.dbgPush(`sync locked · ${e.band}`);
-      else if (e.t === "frame") { const s = e.ok ? "OK ✓" : e.corrected ? "CRC FAIL ✗" : "RS FAIL ✗"; S.dbgPush(`frame ${s} · ${e.band} · ${e.len}B (${e.bytes}B coded)`); }
+      else if (e.t === "selftest") { S.dbgSelfTest.value = e.report; S.dbgPush(`self-test → ${e.report.recommend}${e.report.quiet ? " (quiet!)" : ""}`); console.log("%c[codec] self-test", "color:#acff69", e.report); }
+      else if (e.t === "sync") { S.dbgPush(`sync locked · ${e.band}`); console.log("%c[codec] sync locked", "color:#acff69", e.band, "corr", e.corr); }
+      else if (e.t === "frame") { const s = e.ok ? "OK ✓" : e.corrected ? "CRC FAIL ✗" : "RS FAIL ✗"; S.dbgPush(`frame ${s} · ${e.band} · ${e.len}B (${e.bytes}B coded)`); console.log("%c[codec] frame " + s, "color:#acff69", { band: e.band, len: e.len, coded: e.bytes, rsDecoded: e.corrected }); }
     });
     return () => Music.setDebugSink(null);
   }, []);

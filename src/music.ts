@@ -439,6 +439,7 @@ export async function selfTest(): Promise<SelfTest> {
 // other. Detects the frame's leading sync marker (and the ACK beacon's), which
 // is enough to defer; false on ambient noise (no dominant marker).
 export async function senseBusy(ms = 160): Promise<boolean> {
+  if (loopback) return false; // no shared carrier in loopback
   const c = audioCtx();
   await c.resume().catch(() => {});
   return new Promise((resolve) => {
@@ -528,8 +529,46 @@ export function abortAuto() { aborted = true; if (activeListen) activeListen(nul
 export const autoAborted = () => aborted;
 export const rxBand = (): string | null => lastRxBand; // band ("audible"/"ultrasound") of the last decoded frame
 
+// ── Loopback transport (dev, ?loopback) ─────────────────────────────────────
+// Two tabs on the same machine "hear" each other over a BroadcastChannel instead
+// of a real mic/speaker, so the handshake logic can be tested without audio at
+// all. A frame is delivered only when the sender finishes transmitting AND a
+// peer is currently in listenFor — so the half-duplex turn-taking (and misses)
+// behave like the acoustic channel, minus codec/SNR effects.
+let loopback = false, lbCh: BroadcastChannel | null = null;
+const lbId = Math.random().toString(36).slice(2);
+export function setLoopback(on: boolean) { loopback = on; if (on && !lbCh) lbCh = new BroadcastChannel("share-sound-loopback"); }
+export const isLoopback = () => loopback;
+function lbPlay(payload: Uint8Array, onprogress?: (f: number) => void): Promise<void> {
+  return new Promise((resolve) => {
+    if (aborted) return resolve();
+    const durMs = 250 + payload.length * 30, start = performance.now();
+    let raf = 0;
+    const tick = () => {
+      if (aborted) { cancelAnimationFrame(raf); return resolve(); }
+      const f = Math.min(1, (performance.now() - start) / durMs);
+      onprogress?.(f);
+      if (f >= 1) { lbCh?.postMessage({ from: lbId, bytes: Array.from(payload) }); return resolve(); }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+  });
+}
+function lbListen(timeoutMs: number): Promise<Uint8Array | null> {
+  return new Promise((resolve) => {
+    if (aborted) return resolve(null);
+    let done = false;
+    const finish = (v: Uint8Array | null) => { if (done) return; done = true; clearTimeout(t); lbCh?.removeEventListener("message", onmsg); activeListen = null; resolve(v); };
+    const onmsg = (e: MessageEvent) => { if (done || !e.data || e.data.from === lbId) return; lastRxBand = "loopback"; finish(new Uint8Array(e.data.bytes)); };
+    activeListen = () => finish(null);
+    lbCh?.addEventListener("message", onmsg);
+    const t = setTimeout(() => finish(null), timeoutMs);
+  });
+}
+
 // Play a payload once; resolves when it finishes (or immediately if aborted).
 export function playFrame(payload: Uint8Array, { intro = false, onprogress }: { intro?: boolean; onprogress?: (f: number) => void } = {}): Promise<void> {
+  if (loopback) return lbPlay(payload, onprogress);
   return new Promise((resolve) => {
     if (aborted) return resolve();
     playBytes(payload, { loop: false, intro, onprogress, onended: resolve });
@@ -538,6 +577,7 @@ export function playFrame(payload: Uint8Array, { intro = false, onprogress }: { 
 // Listen until a frame decodes (resolve its payload) or the timeout (resolve null).
 // onProgress(fraction) fires as symbols arrive once the length is known.
 export function listenFor(timeoutMs: number, onProgress?: (f: number) => void): Promise<Uint8Array | null> {
+  if (loopback) return lbListen(timeoutMs);
   return new Promise((resolve) => {
     if (aborted) return resolve(null);
     let done = false;

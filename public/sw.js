@@ -1,7 +1,9 @@
-// Minimal offline cache. We precache the shell and then cache every same-origin
-// GET as it's fetched (the hashed JS/CSS/font assets), so after the first load a
-// reload works offline — pairing itself is peer-to-peer and needs no server.
-const CACHE = "share-v1";
+// Offline cache. Hashed JS/CSS/font assets are immutable, so they're cache-first;
+// the HTML document is network-first so a new deploy is picked up on the next
+// visit instead of being shadowed forever by a stale cached index.html (which
+// would keep pointing at the old hashed bundle). Pairing itself is peer-to-peer
+// and needs no server, so an offline reload still works from the cached shell.
+const CACHE = "share-v2";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-512.png", "./icon-192.png"];
 
 self.addEventListener("install", (e) => {
@@ -16,20 +18,34 @@ self.addEventListener("activate", (e) => {
   );
 });
 
-// Cache-first for the app shell, network-first-ish fallback for everything else.
 self.addEventListener("fetch", (e) => {
   const { request } = e;
   if (request.method !== "GET") return;
+
+  // Document requests: network-first, so a fresh deploy loads immediately;
+  // fall back to the cached shell when offline.
+  const isNav = request.mode === "navigate" || (request.headers.get("accept") || "").includes("text/html");
+  if (isNav) {
+    e.respondWith(
+      fetch(request).then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put("./index.html", copy)).catch(() => {});
+        return res;
+      }).catch(() => caches.match(request).then((h) => h || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  // Everything else (hashed, immutable assets): cache-first, populate on miss.
   e.respondWith(
     caches.match(request).then((hit) =>
       hit || fetch(request).then((res) => {
-        // Cache same-origin GETs so a reload works offline.
         if (res.ok && new URL(request.url).origin === location.origin) {
           const copy = res.clone();
           caches.open(CACHE).then((c) => c.put(request, copy)).catch(() => {});
         }
         return res;
-      }).catch(() => caches.match("./index.html"))
+      }).catch(() => undefined)
     )
   );
 });

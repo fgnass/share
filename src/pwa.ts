@@ -17,5 +17,13 @@ export async function install() {
   deferred = null; canInstall.value = false;
 }
 
-if ("serviceWorker" in navigator)
-  addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
+if ("serviceWorker" in navigator) {
+  if (import.meta.env.PROD) {
+    addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
+  } else {
+    // Dev: never let a cached service worker shadow live code — a stale SW served
+    // old bundles during local testing and masked fixes. Tear any down.
+    navigator.serviceWorker.getRegistrations().then((rs) => rs.forEach((r) => r.unregister())).catch(() => {});
+    caches?.keys?.().then((ks) => ks.forEach((k) => caches.delete(k))).catch(() => {});
+  }
+}

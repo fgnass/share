@@ -61,6 +61,9 @@ export const isIOS = signal(/iphone|ipad|ipod/i.test(navigator.userAgent) &&
 // Fed by music.ts's debug sink (wired in App). Lets us see, on a real device,
 // exactly which tones the mic picks up and how the decoder/self-test behave.
 export const debug = new URLSearchParams(location.search).has("debug");
+// ?loopback: two tabs pair over a BroadcastChannel instead of real audio — lets
+// us test the handshake locally without a mic/speaker. Implies verbose logging.
+export const loopbackMode = new URLSearchParams(location.search).has("loopback");
 export const dbgSpectrum = signal<any>(null);   // latest {sr, state, spectrum:{audible,ultrasound}}
 export const dbgState = signal<string>("idle");
 export const dbgSelfTest = signal<any>(null);   // latest SelfTest report

@@ -259,6 +259,7 @@ async function finalize(inc: Incoming, batch: Batch | null, closeBatch: () => vo
 
 function enterRoom() {
   if (entered) return; entered = true;
+  slog("✅ CONNECTED — data channel open");
   autoRunning = false; stopCamera(); stopAudio();
   clearGrace(); clearPairWatch(); S.stunPrompt.value = false; setRoom("Connected", true, false);
   S.screen.value = "room";
@@ -425,6 +426,7 @@ export async function startAnswerer(code: string) {
   await buildAnswer(code);
 }
 async function becomeAnswerer(code: string) {
+  slog("becomeAnswerer — building answer");
   committed = true; role = "answerer"; lastOfferCode = code;
   // Keep the camera AND (in sound mode) the auto loop running: the camera view is
   // hidden by applyPairUI but still scans to detect a both-answerer race, and the
@@ -451,6 +453,7 @@ async function buildAnswer(code: string) {
   S.myLink.value = linkFor("a", myCode);
   S.qrUrl.value = method() === "camera" ? S.myLink.value : "";
   logGen("answer", pc.localDescription!.sdp);
+  slog("answer ready", { bytes: myAudio?.length });
   applyPairUI();
   setStatus(method() === "sound" ? "Now play your code so they can hear it." : "Waiting for them to scan this…");
 }
@@ -459,7 +462,8 @@ async function buildAnswer(code: string) {
 function onScan(parsed: { type: string; code: string }, manual = false) {
   if (parsed.code === myCode) return;      // our own reflection
   let dec;
-  try { dec = decode(parsed.code); } catch { return; }
+  try { dec = decode(parsed.code); } catch (e) { slog("onScan decode failed", e); return; }
+  slog("onScan", { type: parsed.type, peerNonce: dec.nonce, myNonce, role, committed, applied, entered });
   // STUN propagation: a peer's code carrying a reflexive (srflx) candidate means
   // it turned STUN on. A one-sided srflx rarely connects, so we adopt it too and
   // regenerate our side with STUN — which then carries srflx to them in turn.
@@ -469,21 +473,21 @@ function onScan(parsed: { type: string; code: string }, manual = false) {
     // answerer: fall through — becomeAnswerer below rebuilds the answer with STUN on.
   }
   if (parsed.type === "a") {               // an answer
-    if (role === "offerer" && !applied) applyAnswer(dec as any);
+    if (role === "offerer" && !applied) { slog("apply their answer → connecting"); applyAnswer(dec as any); }
     else if (role === "answerer" && !applied && !entered && myNonce > dec.nonce) {
-      committed = false; role = "offerer"; mintOffer(); // both answered → higher nonce reverts
+      slog("both answered → higher nonce reverts to offerer"); committed = false; role = "offerer"; mintOffer();
     }
     return;
   }
   if (manual) return void becomeAnswerer(parsed.code);
   if (role === "answerer") {
-    if (!entered && parsed.code !== lastOfferCode) becomeAnswerer(parsed.code); // recovery: new offer
+    if (!entered && parsed.code !== lastOfferCode) { slog("new offer → rebuild answer"); becomeAnswerer(parsed.code); }
     return;
   }
   if (committed) return;
-  if (dec.nonce === myNonce) { myNonce = freshNonce(); mintOffer(); return; } // tie → reroll
-  if (myNonce < dec.nonce) becomeAnswerer(parsed.code);
-  else setStatus("Saw their code. Now point their camera at yours");
+  if (dec.nonce === myNonce) { slog("nonce tie → reroll"); myNonce = freshNonce(); mintOffer(); return; } // tie → reroll
+  if (myNonce < dec.nonce) { slog("lower nonce → become answerer"); becomeAnswerer(parsed.code); }
+  else { slog("higher nonce → stay offerer, wait for their answer"); setStatus("Saw their code. Now point their camera at yours"); }
 }
 
 // ── Handoff tab (#a=) ──
@@ -558,6 +562,9 @@ export function stopSoundAuto() { autoRunning = false; abortAuto(); soundBusyUI(
 
 const rand = (min: number, span: number) => min + Math.floor(Math.random() * span);
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+// Verbose handshake logging (?debug or ?loopback). Prefixed with our nonce so two
+// tabs' logs are easy to tell apart in one console.
+const slog = (...a: any[]) => { if (S.debug || S.loopbackMode) console.log(`%c[sound ${myNonce}]`, "color:#6ea8ff;font-weight:bold", ...a); };
 const ackFrame = () => new Uint8Array([ACK, (myNonce >> 8) & 255, myNonce & 255]);
 const ackNonce = (f: Uint8Array) => (f[1] << 8) | f[2];
 const codeOf = (f: Uint8Array) => b64u(f.subarray(1));
@@ -572,33 +579,43 @@ export async function soundAuto() {
   if (autoRunning) return;
   autoRunning = true; resetAuto(); soundBusyUI(true);
   bandMatched = false; bandGuess = false; volumeLow = false; ackTick = 0;
-  if (S.bandMode.value !== "auto") { setUltrasound(S.bandMode.value === "ultrasound"); bandMatched = true; }
-  else {
+  slog("soundAuto start", { role, myNonce, band: S.bandMode.value, loopback: S.loopbackMode });
+  if (S.loopbackMode) {
+    bandMatched = true; // no bands over the loopback channel
+  } else if (S.bandMode.value !== "auto") {
+    setUltrasound(S.bandMode.value === "ultrasound"); bandMatched = true;
+  } else {
     // Capability check first: play tones through our own speaker and see which
     // band our own mic hears. Pick the highest band that round-trips; if we can't
     // even hear our own audible, the device is muted / too quiet — tell the user.
     setAudioStatus("Checking speaker & mic…");
     try {
       const r = await selfTest();
+      slog("self-test", { recommend: r.recommend, good: r.bands.map((b) => `${b.name}:${b.good}/16`) });
       if (alive()) {
         setUltrasound(r.recommend === "ultrasound"); bandGuess = true;
         volumeLow = r.recommend === "louder";
       }
-    } catch { /* mic denied etc. → fall back to blind band alternation */ }
+    } catch (e) { slog("self-test failed", e); /* mic denied etc. → blind band alternation */ }
   }
   if (!alive()) { autoRunning = false; soundBusyUI(false); return; }
   try {
     while (alive()) {
       // LISTEN first (randomized window). Never open by transmitting.
-      const f = await listenFor(rand(LISTEN_MIN, LISTEN_SPAN), setProgress); setProgress(null);
+      const win = S.loopbackMode ? rand(1200, 1600) : rand(LISTEN_MIN, LISTEN_SPAN);
+      slog(`listening ${win}ms (role=${role})`);
+      const f = await listenFor(win, setProgress); setProgress(null);
       if (!alive()) break;
+      slog("heard", f ? (isAck(f) ? `ACK nonce=${ackNonce(f)}` : isOffer(f) ? "OFFER" : isAnswer(f) ? "ANSWER" : `type=0x${f[0].toString(16)}`) : "nothing");
 
       if (isAck(f) && ackNonce(f!) !== myNonce) {
         // Peer announced presence → hand them our current code, once, if the
         // channel is clear. (Both hearing each other and both sending collides at
         // most once; RS/CRC reject it and the randomized re-listen desyncs them.)
         matchBand();
-        if (!(await senseBusy())) {
+        const busy = await senseBusy();
+        slog("peer ACK → send our code", { kind: isOffer(myAudio) ? "offer" : isAnswer(myAudio) ? "answer" : "?", bytes: myAudio?.length, busy });
+        if (!busy) {
           setAudioStatus("Sending your code…"); setProgress(0);
           await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
         }
@@ -606,23 +623,25 @@ export async function soundAuto() {
       }
       if (isAnswer(f)) {
         const code = codeOf(f!);
-        if (code !== myCode) { matchBand(); setAudioStatus("Got their reply — connecting…"); onScan({ type: "a", code }); }
+        if (code !== myCode) { matchBand(); setAudioStatus("Got their reply — connecting…"); slog("→ onScan(answer)"); onScan({ type: "a", code }); }
         continue;
       }
       if (isOffer(f)) {
         const code = codeOf(f!);
-        if (code !== myCode) { matchBand(); onScan({ type: "o", code }); }
+        if (code !== myCode) { matchBand(); slog("→ onScan(offer)"); onScan({ type: "o", code }); }
+        else slog("ignored own offer echo");
         continue;
       }
 
       // Silent window → announce presence with a short ACK beacon. Extra jitter +
       // carrier sense so two simultaneously-idle devices don't beacon in lockstep.
       await sleep(rand(0, 500));
-      if (!alive() || (await senseBusy())) continue;
+      if (!alive() || (await senseBusy())) { slog("beacon skipped (busy/dead)"); continue; }
       if (!alive()) break;
       pickTxBand(ackTick++);
       setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself."
         : role === "answerer" ? "Ready — waiting for their go-ahead…" : "Looking for the other device…");
+      slog(`beacon ACK (tick ${ackTick})`);
       await playFrame(ackFrame(), { intro: ackTick % 3 === 0 });
     }
   } catch { setAudioStatus("Audio/mic unavailable on this device."); }
