@@ -13,6 +13,8 @@
 // The pure codec (encodeWaveform / makeDecoder) takes an explicit sample rate so
 // it can be unit-tested in Node; the Web-Audio wrappers are below.
 
+import { rsEncode, rsDecode } from "./rs";
+
 const TONE_MS = 36, GAP_MS = 6, SYNC_MS = 140, SYNC_GAP_MS = 40, DET_MS = 28;
 
 const midiHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
@@ -55,17 +57,32 @@ function crc8(bytes) {
   return c;
 }
 
+// Reed-Solomon parity budget as a function of message length — ~30% overhead,
+// clamped so it stays useful for tiny frames and never overruns GF(256)'s 255-
+// byte codeword. A pure function of K, so encoder and decoder agree without
+// negotiating: the decoder derives it from the length it reads.
+function parityFor(k: number): number {
+  return Math.min(255 - (k + 1), Math.max(8, Math.round((k + 1) * 0.3)));
+}
+
+// Frame = [K, K, K] (length byte, sent thrice → majority vote survives a flipped
+// symbol) followed by an RS codeword over [...payload, crc8(payload)]. RS repairs
+// a bounded number of bad symbols so the sender needn't replay the whole tune;
+// the CRC is the final check after correction. Every byte → two 4-bit nibbles.
 function frameNibbles(payload) {
-  const body = new Uint8Array(1 + payload.length);
-  body[0] = payload.length & 0xff;
-  body.set(payload, 1);
-  const all = new Uint8Array(body.length + 1);
-  all.set(body);
-  all[all.length - 1] = crc8(body);
+  const K = payload.length & 0xff;
+  const msg = new Uint8Array(K + 1);
+  msg.set(payload.subarray(0, K));
+  msg[K] = crc8(payload.subarray(0, K));
+  const body = rsEncode(msg, parityFor(K));
+  const all = new Uint8Array(3 + body.length);
+  all[0] = all[1] = all[2] = K;
+  all.set(body, 3);
   const nibs = [];
   for (const b of all) nibs.push(b >> 4, b & 0x0f);
   return nibs;
 }
+const majority3 = (a: number, b: number, c: number) => (a === b || a === c ? a : b === c ? b : a);
 
 // Add one tone into `data` at sample `off`. Options: wave = "sine" (with `harm`
 // 2nd-harmonic amount) or "square" (buzzy 8-bit chiptune, a few odd harmonics);
@@ -170,7 +187,7 @@ export function makeDecoder(sr, onComplete, onProgress) {
   const syncN = Math.round(SYNC_MS / 1000 * sr), sgN = Math.round(SYNC_GAP_MS / 1000 * sr);
   const hop = Math.max(64, Math.round(sr * 0.004));
   let buf = new Float32Array(0), state = "search", scan = 0, runStart = -1, runBand = null;
-  let band = null, dataStart = 0, sym = 0, need = 0, nibs = [];
+  let band = null, dataStart = 0, sym = 0, need = 0, nibs = [], curK = 0, curP = 0, bodyBytes = 0;
 
   // Return the band whose marker dominates at position p, or null. Auto-detects
   // audible vs ultrasound so the sender's choice needn't match the listener.
@@ -192,7 +209,7 @@ export function makeDecoder(sr, onComplete, onProgress) {
     for (let i = 0; i < 16; i++) { const g = goertzel(buf, p, win, band.notes[i], sr); if (g > best) { best = g; bi = i; } }
     return bi;
   };
-  const reset = () => { state = "search"; scan = Math.max(0, buf.length - toneN); runStart = -1; runBand = null; band = null; sym = 0; need = 0; nibs = []; };
+  const reset = () => { state = "search"; scan = Math.max(0, buf.length - toneN); runStart = -1; runBand = null; band = null; sym = 0; need = 0; nibs = []; curK = 0; curP = 0; bodyBytes = 0; };
 
   function push(chunk) {
     const nb = new Float32Array(buf.length + chunk.length);
@@ -223,15 +240,25 @@ export function makeDecoder(sr, onComplete, onProgress) {
     if (state === "data") {
       while (dataStart + sym * symN + toneN <= buf.length) {
         nibs.push(decodeSym(sym)); sym++;
-        if (sym === 2) need = 2 * (1 + ((nibs[0] << 4) | nibs[1]) + 1);
+        if (sym === 6 && !need) {
+          // Three length bytes were sent; majority-vote so one flipped symbol
+          // doesn't derail the whole frame, then derive the RS body size.
+          const b0 = (nibs[0] << 4) | nibs[1], b1 = (nibs[2] << 4) | nibs[3], b2 = (nibs[4] << 4) | nibs[5];
+          curK = majority3(b0, b1, b2);
+          if (curK < 1 || curK > 254) { reset(); break; } // implausible length → resync
+          curP = parityFor(curK);
+          bodyBytes = curK + 1 + curP;
+          need = 6 + 2 * bodyBytes;
+        }
         if (need && onProgress) onProgress(Math.min(1, sym / need)); // length is sent first → we know the total
         if (need && sym >= need) {
-          const bytes = new Uint8Array(need / 2);
-          for (let i = 0; i < bytes.length; i++) bytes[i] = (nibs[2 * i] << 4) | nibs[2 * i + 1];
-          const len = bytes[0], body = bytes.subarray(0, 1 + len);
-          const ok = len > 0 && crc8(body) === bytes[1 + len];
-          dbg({ t: "frame", ok, band: band.name, len, bytes: bytes.length });
-          if (ok) onComplete(bytes.subarray(1, 1 + len), band.name);
+          const body = new Uint8Array(bodyBytes);
+          for (let i = 0; i < bodyBytes; i++) body[i] = (nibs[6 + 2 * i] << 4) | nibs[6 + 2 * i + 1];
+          const msg = rsDecode(body, curP);            // repair up to curP/2 bad symbols
+          let ok = false, payload: Uint8Array | null = null;
+          if (msg) { payload = msg.subarray(0, curK); ok = crc8(payload) === msg[curK]; }
+          dbg({ t: "frame", ok, band: band.name, len: curK, bytes: bodyBytes, corrected: !!msg });
+          if (ok) onComplete(payload, band.name);
           reset();
           break;
         }
@@ -381,6 +408,48 @@ export async function selfTest(): Promise<SelfTest> {
   const report: SelfTest = { sampleRate: sr, bands, recommend, quiet };
   dbg({ t: "selftest", report });
   return report;
+}
+
+// ── Carrier sense ───────────────────────────────────────────────────────────
+// Briefly open the mic and report whether a peer is transmitting right now — a
+// marker tone dominating either band's note bins. Used by the half-duplex loop
+// to hold off before it talks (CSMA/CA), so two devices don't step on each
+// other. Detects the frame's leading sync marker (and the ACK beacon's), which
+// is enough to defer; false on ambient noise (no dominant marker).
+export async function senseBusy(ms = 160): Promise<boolean> {
+  const c = audioCtx();
+  await c.resume().catch(() => {});
+  return new Promise((resolve) => {
+    let stream: MediaStream | null = null, node: any = null, src: any = null, mute: any = null;
+    let buf = new Float32Array(0), done = false;
+    const sr = c.sampleRate, toneN = Math.round(TONE_MS / 1000 * sr);
+    const finish = (v: boolean) => {
+      if (done) return; done = true;
+      if (node) { node.onaudioprocess = null; try { node.disconnect(); } catch {} }
+      if (src) try { src.disconnect(); } catch {}
+      if (mute) try { mute.disconnect(); } catch {}
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      resolve(v);
+    };
+    navigator.mediaDevices.getUserMedia({ audio: MIC }).then((s) => {
+      if (done) { s.getTracks().forEach((t) => t.stop()); return; }
+      stream = s; src = c.createMediaStreamSource(s); node = c.createScriptProcessor(2048, 1, 1);
+      node.onaudioprocess = (e: any) => {
+        const ch = new Float32Array(e.inputBuffer.getChannelData(0));
+        const nb = new Float32Array(buf.length + ch.length); nb.set(buf); nb.set(ch, buf.length); buf = nb;
+        if (buf.length < toneN) return;
+        const p = buf.length - toneN;
+        for (const B of [BANDS.audible, BANDS.ultrasound]) {
+          const mp = goertzel(buf, p, toneN, B.marker, sr);
+          let mx = 0; for (const f of B.notes) { const g = goertzel(buf, p, toneN, f, sr); if (g > mx) mx = g; }
+          if (mp > 3 * mx && mp > 1e-3) return finish(true);
+        }
+      };
+      mute = c.createGain(); mute.gain.value = 0;
+      src.connect(node); node.connect(mute); mute.connect(c.destination);
+      setTimeout(() => finish(false), ms);
+    }).catch(() => finish(false));
+  });
 }
 
 // ── Live spectrum monitor (debug) ───────────────────────────────────────────

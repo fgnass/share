@@ -5,7 +5,7 @@ import {
 } from "./webrtc";
 import {
   playFrame, listenFor, stopAudio, setUltrasound, resetAuto, abortAuto,
-  isOffer, isAnswer, isAck, ACK, rxBand, selfTest,
+  isOffer, isAnswer, isAck, ACK, rxBand, selfTest, senseBusy,
 } from "./music";
 import * as S from "./state";
 import { method as methodS } from "./state";
@@ -539,14 +539,16 @@ export function retryWithStun() {
   role === "answerer" && lastOfferCode ? buildAnswer(lastOfferCode) : mintOffer();
 }
 
-// ── Automatic sound pairing: ACK-gated, half-duplex code exchange ──
-// Invariant: a device NEVER transmits its code (offer/answer) except in the very
-// step after it has heard a *peer's* ACK. So a device alone in a room never
-// sends anything but short ACK beacons — it can't mistake its own echo for a
-// reply, because its ACK carries its own nonce and is filtered out. Both sides
-// start holding an offer; role, tiebreak and recovery all run through onScan
-// (shared with the QR path), which flips a device to answerer when appropriate.
-const LISTEN_MS = 18000; // long enough to capture one full payload in a single listen
+// ── Automatic sound pairing: symmetric, listen-first half-duplex (CSMA/CA) ──
+// No fixed roles. Every device LISTENS first (for a randomized window) and only
+// transmits into a silent channel, after a quick carrier-sense confirms nobody
+// else is mid-frame. Two devices tapped at the same instant therefore never open
+// by blaring over each other — the randomized windows make them fall into taking
+// turns, and any rare collision just garbles a frame (RS/CRC reject it) and both
+// re-listen with fresh random timing, so they desync instead of livelocking.
+// A device alone still only emits short ACK beacons (never its code) until it
+// hears a peer. Role/tiebreak/recovery run through onScan (shared with QR).
+const LISTEN_MIN = 12000, LISTEN_SPAN = 8000; // randomized listen window (12–20 s), catches one full RS-coded frame
 let autoRunning = false, bandMatched = false, bandGuess = false, volumeLow = false, ackTick = 0;
 
 const setAudioStatus = (t: string) => (S.audioStatus.value = t);
@@ -587,33 +589,41 @@ export async function soundAuto() {
   if (!alive()) { autoRunning = false; soundBusyUI(false); return; }
   try {
     while (alive()) {
-      // A little jitter so two devices don't lock into playing over each other.
-      await sleep(rand(0, 700));
-      if (!alive()) break;
-      // Announce we're here and ready to receive. ACK is a control frame, safe to
-      // send unsolicited; the Mario theme rides along every few beats for flavour.
-      pickTxBand(ackTick);
-      setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself."
-        : role === "answerer" ? "Ready — waiting for their go-ahead…" : "Looking for the other device…");
-      await playFrame(ackFrame(), { intro: ackTick % 3 === 0 });
-      ackTick++;
-      if (!alive()) break;
-
-      const f = await listenFor(LISTEN_MS, setProgress); setProgress(null);
+      // LISTEN first (randomized window). Never open by transmitting.
+      const f = await listenFor(rand(LISTEN_MIN, LISTEN_SPAN), setProgress); setProgress(null);
       if (!alive()) break;
 
       if (isAck(f) && ackNonce(f!) !== myNonce) {
-        // A peer signalled ready → transmit our current code exactly once.
+        // Peer announced presence → hand them our current code, once, if the
+        // channel is clear. (Both hearing each other and both sending collides at
+        // most once; RS/CRC reject it and the randomized re-listen desyncs them.)
         matchBand();
-        setAudioStatus("Sending your code…"); setProgress(0);
-        await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
-      } else if (isAnswer(f)) {
+        if (!(await senseBusy())) {
+          setAudioStatus("Sending your code…"); setProgress(0);
+          await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
+        }
+        continue;
+      }
+      if (isAnswer(f)) {
         const code = codeOf(f!);
         if (code !== myCode) { matchBand(); setAudioStatus("Got their reply — connecting…"); onScan({ type: "a", code }); }
-      } else if (isOffer(f)) {
+        continue;
+      }
+      if (isOffer(f)) {
         const code = codeOf(f!);
         if (code !== myCode) { matchBand(); onScan({ type: "o", code }); }
+        continue;
       }
+
+      // Silent window → announce presence with a short ACK beacon. Extra jitter +
+      // carrier sense so two simultaneously-idle devices don't beacon in lockstep.
+      await sleep(rand(0, 500));
+      if (!alive() || (await senseBusy())) continue;
+      if (!alive()) break;
+      pickTxBand(ackTick++);
+      setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself."
+        : role === "answerer" ? "Ready — waiting for their go-ahead…" : "Looking for the other device…");
+      await playFrame(ackFrame(), { intro: ackTick % 3 === 0 });
     }
   } catch { setAudioStatus("Audio/mic unavailable on this device."); }
   autoRunning = false; soundBusyUI(false);

@@ -13,7 +13,7 @@ export function App() {
       if (e.t === "spectrum") { S.dbgSpectrum.value = e; S.dbgState.value = e.state; }
       else if (e.t === "selftest") { S.dbgSelfTest.value = e.report; S.dbgPush(`self-test → ${e.report.recommend}${e.report.quiet ? " (quiet!)" : ""}`); }
       else if (e.t === "sync") S.dbgPush(`sync locked · ${e.band}`);
-      else if (e.t === "frame") S.dbgPush(`frame ${e.ok ? "OK ✓" : "CRC FAIL ✗"} · ${e.band} · ${e.bytes}B`);
+      else if (e.t === "frame") { const s = e.ok ? "OK ✓" : e.corrected ? "CRC FAIL ✗" : "RS FAIL ✗"; S.dbgPush(`frame ${s} · ${e.band} · ${e.len}B (${e.bytes}B coded)`); }
     });
     return () => Music.setDebugSink(null);
   }, []);
