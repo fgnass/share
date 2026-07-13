@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import { effect } from "@preact/signals";
 import * as S from "./state";
 import * as P from "./pairing";
 import * as Music from "./music";
@@ -14,13 +15,19 @@ export function App() {
   useEffect(() => {
     if (S.loopbackMode) Music.setLoopback(true);
     if (!S.debug) return;
+    // Console/automation handle + live state in the tab title, so an automated
+    // test can watch progress from outside (e.g. via the CDP /json page list).
+    (globalThis as any).__dbg = { S, P, Music };
+    const unTitle = effect(() => {
+      document.title = S.screen.value === "room" ? "CONNECTED" : `${S.screen.value} · ${S.audioStatus.value}`;
+    });
     Music.setDebugSink((e: any) => {
       if (e.t === "spectrum") { S.dbgSpectrum.value = e; S.dbgState.value = e.state; }
       else if (e.t === "selftest") { S.dbgSelfTest.value = e.report; S.dbgPush(`self-test → ${e.report.recommend}${e.report.quiet ? " (quiet!)" : ""}`); console.log("%c[codec] self-test", "color:#acff69", e.report); }
       else if (e.t === "sync") { S.dbgPush(`sync locked · ${e.band}`); console.log("%c[codec] sync locked", "color:#acff69", e.band, "corr", e.corr); }
       else if (e.t === "frame") { const s = e.ok ? "OK ✓" : e.corrected ? "CRC FAIL ✗" : "RS FAIL ✗"; S.dbgPush(`frame ${s} · ${e.band} · ${e.len}B (${e.bytes}B coded)`); console.log("%c[codec] frame " + s, "color:#acff69", { band: e.band, len: e.len, coded: e.bytes, rsDecoded: e.corrected }); }
     });
-    return () => Music.setDebugSink(null);
+    return () => { Music.setDebugSink(null); unTitle(); };
   }, []);
   return (
     <main>

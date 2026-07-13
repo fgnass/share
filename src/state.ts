@@ -25,7 +25,9 @@ export const camError = signal(false);
 export const audioStatus = signal("Pair by sound");
 export const audioBusy = signal(false);
 export const audioProgress = signal<number | null>(null); // 0..1 or null
-export const bandMode = signal<BandMode>("auto");
+// ?band=audible|ultrasound presets the band (handy for testing); default auto.
+const bandParam = new URLSearchParams(location.search).get("band") as BandMode | null;
+export const bandMode = signal<BandMode>(bandParam === "audible" || bandParam === "ultrasound" ? bandParam : "auto");
 
 // STUN is off by default (same-network pairing contacts nothing external). It is
 // turned on automatically when a direct attempt fails and the user confirms, or

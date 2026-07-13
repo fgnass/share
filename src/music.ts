@@ -239,6 +239,13 @@ export function makeDecoder(sr, onComplete, onProgress) {
     return out;
   };
   const reset = () => { state = "search"; scan = Math.max(0, buf.length - chirpN); band = null; sym = 0; need = 0; nibs = []; curK = 0; curP = 0; bodyBytes = 0; };
+  // How many ms of the current frame are still in the air. Known as soon as the
+  // length bytes (first 2 symbols) are in; before that, the time to those bytes.
+  const etaMs = () => {
+    if (state !== "data") return 0;
+    const totalSym = need ? Math.ceil(need / band.groups) : 2;
+    return Math.max(0, ((dataStart + totalSym * symN + toneN - buf.length) / sr) * 1000);
+  };
 
   function push(chunk) {
     const nb = new Float32Array(buf.length + chunk.length);
@@ -291,8 +298,15 @@ export function makeDecoder(sr, onComplete, onProgress) {
         }
       }
     }
+    // Trim consumed samples so a long-lived decoder (the persistent rx session
+    // keeps one open for the whole pairing) doesn't grow its buffer forever —
+    // the concat above copies the WHOLE buffer per push. Rebase all positions.
+    const cut = state === "search"
+      ? Math.min(scan, Math.max(0, buf.length - (chirpN + 2 * COARSE)))
+      : Math.max(0, Math.min(dataStart + sym * symN, buf.length)); // symbols already decoded
+    if (cut > 0) { buf = buf.slice(cut); scan = Math.max(0, scan - cut); dataStart -= cut; }
   }
-  return { push, reset, inFrame: () => state === "data" };
+  return { push, reset, inFrame: () => state === "data", etaMs };
 }
 
 // ── Web Audio wrappers ─────────────────────────────────────────────────────
@@ -330,23 +344,55 @@ function stopTx() {
 }
 
 let rxStream = null, rxNode = null, rxSrc = null, rxMute = null, rxDec = null;
-export const rxInFrame = () => !!rxDec && rxDec.inFrame(); // decoder is mid-frame (don't cut the listen)
-export async function startListening(onComplete, onProgress) {
-  const c = audioCtx();
-  await c.resume().catch(() => {});
-  stopRx();
-  rxStream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: false, autoGainControl: false, noiseSuppression: false },
-  });
-  rxSrc = c.createMediaStreamSource(rxStream);
-  rxNode = c.createScriptProcessor(2048, 1, 1);
-  const dec = makeDecoder(c.sampleRate, onComplete, onProgress);
-  rxDec = dec;
-  rxNode.onaudioprocess = (e) => dec.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-  rxMute = c.createGain(); rxMute.gain.value = 0; // keep the processor pulling without echoing to speakers
-  rxSrc.connect(rxNode); rxNode.connect(rxMute); rxMute.connect(c.destination);
+export const rxInFrame = () => !!rxDec && rxDec.inFrame(); // decoder is mid-frame (don't talk over it)
+export const rxEtaMs = (): number => (rxDec ? rxDec.etaMs() : 0); // ms until that frame should finish
+
+// ── Persistent receive session ──────────────────────────────────────────────
+// The mic opens ONCE per pairing session and a single decoder runs continuously;
+// finished frames land in a small queue that listenFor() consumes. The previous
+// open/close-per-listen design left a getUserMedia-sized (~100–400 ms) deaf gap
+// between listens — exactly where the peer's next sync chirp lands after we
+// decode a frame (GOT → answer follows within ~100 ms). Missing that 80 ms chirp
+// costs the whole multi-second frame behind it, which is what kept real
+// ultrasound pairing from ever converging: offer re-sends then collide with
+// answer re-sends, forever. A side bonus: frames decoded while WE transmit (our
+// own echo, or a peer on hardware that manages full duplex) queue up instead of
+// being lost.
+type RxItem = { bytes: Uint8Array; band: string; at: number };
+let rxQ: RxItem[] = [];
+let rxWaiter: ((item: RxItem) => void) | null = null; // pending listenFor, if any
+let rxProgress: ((f: number) => void) | null = null;  // its progress callback
+let rxStarting: Promise<void> | null = null;
+let rxGen = 0; // bumped by stopRx so an in-flight open knows it lost the race
+
+async function ensureRx(): Promise<void> {
+  if (rxNode) return;
+  if (rxStarting) return rxStarting;
+  const gen = ++rxGen;
+  rxStarting = (async () => {
+    const c = audioCtx();
+    await c.resume().catch(() => {});
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC });
+    if (gen !== rxGen) { stream.getTracks().forEach((t) => t.stop()); return; } // stopped while opening
+    rxStream = stream;
+    rxSrc = c.createMediaStreamSource(stream);
+    rxNode = c.createScriptProcessor(2048, 1, 1);
+    const dec = makeDecoder(c.sampleRate, (bytes, band) => {
+      lastRxBand = band;
+      const item = { bytes, band, at: performance.now() };
+      const w = rxWaiter; rxWaiter = null;
+      if (w) w(item); else rxQ.push(item);
+    }, (f) => { if (rxProgress) rxProgress(f); });
+    rxDec = dec;
+    rxNode.onaudioprocess = (e) => dec.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    rxMute = c.createGain(); rxMute.gain.value = 0; // keep the processor pulling without echoing to speakers
+    rxSrc.connect(rxNode); rxNode.connect(rxMute); rxMute.connect(c.destination);
+  })().finally(() => { rxStarting = null; });
+  return rxStarting;
 }
 function stopRx() {
+  rxGen++;
+  rxQ = []; rxWaiter = null; rxProgress = null;
   if (rxNode) { rxNode.onaudioprocess = null; try { rxNode.disconnect(); } catch {} rxNode = null; }
   if (rxSrc) { try { rxSrc.disconnect(); } catch {} rxSrc = null; }
   if (rxMute) { try { rxMute.disconnect(); } catch {} rxMute = null; }
@@ -369,21 +415,19 @@ const naptime = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export type BandTest = { name: string; markerSnr: number; noteSnr: number[]; good: number; ok: boolean };
 export type SelfTest = { sampleRate: number; bands: BandTest[]; recommend: string; quiet: boolean };
 
-export async function selfTest(): Promise<SelfTest> {
-  const c = audioCtx();
-  await c.resume().catch(() => {});
+const SNR_OK = 10;
+const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1] ?? 0; };
+
+// Play a comb of tones through the speaker while recording our own mic; returns
+// per-tone SNR in dB (strongest window anywhere vs. the noise floor measured in
+// the silent lead-in before playback).
+async function probeTones(c, freqs: number[], amp: number): Promise<number[]> {
   const sr = c.sampleRate;
-  const P = bandFreqs();
-  const order = ["audible", "ultrasound"] as const;
-  const seq: number[] = [];
-  for (const b of order) seq.push(...P[b].notes);
-
-  const toneN = Math.round(0.07 * sr), gapN = Math.round(0.03 * sr), leadN = Math.round(0.3 * sr);
-  const data = new Float32Array(leadN + seq.length * (toneN + gapN) + Math.round(0.15 * sr));
+  const toneN = Math.round(0.06 * sr), gapN = Math.round(0.025 * sr), leadN = Math.round(0.25 * sr);
+  const data = new Float32Array(leadN + freqs.length * (toneN + gapN) + Math.round(0.12 * sr));
   let p = leadN;
-  for (const f of seq) { addTone(data, p, f, toneN, sr, { amp: 0.45, harm: f < 10000 ? 0.15 : 0 }); p += toneN + gapN; }
+  for (const f of freqs) { addTone(data, p, f, toneN, sr, { amp, harm: f < 10000 ? 0.15 : 0 }); p += toneN + gapN; }
 
-  // Record from before playback so the lead-in captures the ambient noise floor.
   const chunks: Float32Array[] = [];
   const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC });
   const src = c.createMediaStreamSource(stream);
@@ -405,15 +449,11 @@ export async function selfTest(): Promise<SelfTest> {
   { let o = 0; for (const ch of chunks) { buf.set(ch, o); o += ch.length; } }
 
   const win = toneN, leadWin = Math.min(leadN, buf.length);
-  // Noise floor for a freq: mean Goertzel power over same-size windows in the
-  // silent lead-in — directly comparable to the signal peak below.
   const floorOf = (f: number) => {
     let sum = 0, cnt = 0;
     for (let s = 0; s + win <= leadWin; s += win) { sum += goertzel(buf, s, win, f, sr); cnt++; }
     return Math.max(cnt ? sum / cnt : 1e-12, 1e-12);
   };
-  // Signal for a freq: the strongest window anywhere (the tone was emitted, so
-  // its peak ≈ how loudly it came back).
   const peakOf = (f: number) => {
     let best = 0;
     for (let s = 0; s + win <= buf.length; s += Math.round(win / 2)) {
@@ -421,22 +461,34 @@ export async function selfTest(): Promise<SelfTest> {
     }
     return best;
   };
-  const snrDb = (f: number) => 10 * Math.log10(peakOf(f) / floorOf(f));
+  return freqs.map((f) => 10 * Math.log10(peakOf(f) / floorOf(f)));
+}
 
-  const SNR_OK = 10;
-  const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1] ?? 0; };
-  const bands: BandTest[] = order.map((name) => {
-    const noteSnr = P[name].notes.map((f) => snrDb(f));
+export async function selfTest(): Promise<SelfTest> {
+  const c = audioCtx();
+  await c.resume().catch(() => {});
+  const P = bandFreqs();
+  const bands: BandTest[] = [];
+  const probe = async (name: string, freqs: number[], amp: number): Promise<BandTest> => {
+    const noteSnr = await probeTones(c, freqs, amp);
     const good = noteSnr.filter((s) => s >= SNR_OK).length;
-    // markerSnr holds the median bin SNR now (no separate marker tone anymore).
-    return { name, markerSnr: median(noteSnr), noteSnr, good, ok: good >= noteSnr.length - 3 };
-  });
-
-  const us = bands.find((b) => b.name === "ultrasound")!;
-  const aud = bands.find((b) => b.name === "audible")!;
-  const quiet = !aud.ok && aud.markerSnr < 6;   // can't even hear our own audible → muted / too quiet
-  const recommend = us.ok ? "ultrasound" : aud.ok ? "audible" : quiet ? "louder" : "audible";
-  const report: SelfTest = { sampleRate: sr, bands, recommend, quiet };
+    // markerSnr holds the median bin SNR (no separate marker tone anymore).
+    const b: BandTest = { name, markerSnr: median(noteSnr), noteSnr, good, ok: good >= noteSnr.length - 3 };
+    bands.push(b);
+    return b;
+  };
+  // Ultrasound first: it's inaudible, so on capable hardware the whole self-test
+  // makes no audible sound at all. Only if ultrasound fails do we probe the
+  // audible band — and then sparsely (every 4th bin, the response is smooth) and
+  // gently, instead of the former full-sweep siren.
+  const us = await probe("ultrasound", P.ultrasound.notes, 0.5);
+  let aud: BandTest | null = null, quiet = false;
+  if (!us.ok) {
+    aud = await probe("audible", P.audible.notes.filter((_, i) => i % 4 === 0), 0.22);
+    quiet = !aud.ok && aud.markerSnr < 6;   // can't even hear our own audible → muted / too quiet
+  }
+  const recommend = us.ok ? "ultrasound" : aud!.ok ? "audible" : quiet ? "louder" : "audible";
+  const report: SelfTest = { sampleRate: c.sampleRate, bands, recommend, quiet };
   dbg({ t: "selftest", report });
   return report;
 }
@@ -557,15 +609,14 @@ function lbPlay(payload: Uint8Array, onprogress?: (f: number) => void): Promise<
   return new Promise((resolve) => {
     if (aborted) return resolve();
     const durMs = 250 + payload.length * 30, start = performance.now();
-    let raf = 0;
-    const tick = () => {
-      if (aborted) { cancelAnimationFrame(raf); return resolve(); }
+    // A timer, NOT requestAnimationFrame: rAF pauses in hidden tabs, which
+    // deadlocked two-tab loopback tests when one tab was in the background.
+    const iv = setInterval(() => {
+      if (aborted) { clearInterval(iv); return resolve(); }
       const f = Math.min(1, (performance.now() - start) / durMs);
       onprogress?.(f);
-      if (f >= 1) { lbCh?.postMessage({ from: lbId, bytes: Array.from(payload) }); return resolve(); }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
+      if (f >= 1) { clearInterval(iv); lbCh?.postMessage({ from: lbId, bytes: Array.from(payload) }); resolve(); }
+    }, 50);
   });
 }
 function lbListen(timeoutMs: number): Promise<Uint8Array | null> {
@@ -585,25 +636,44 @@ export function playFrame(payload: Uint8Array, { intro = false, onprogress }: { 
   if (loopback) return lbPlay(payload, onprogress);
   return new Promise((resolve) => {
     if (aborted) return resolve();
-    playBytes(payload, { loop: false, intro, onprogress, onended: resolve });
+    playBytes(payload, { loop: false, intro, onprogress, onended: () => {
+      // We just filled the air with our own signal, so whatever the decoder is
+      // mid-way through is (almost certainly) our own echo. Reset it: instantly
+      // ready for the peer's reply chirp instead of finishing our own frame.
+      if (rxDec) rxDec.reset();
+      resolve();
+    } });
   });
 }
 // Listen until a frame decodes (resolve its payload) or the timeout (resolve null).
+// Consumes the persistent rx session: frames that completed while nobody was
+// listening (e.g. during our own transmission) are handed over immediately.
 // onProgress(fraction) fires as symbols arrive once the length is known.
 export function listenFor(timeoutMs: number, onProgress?: (f: number) => void): Promise<Uint8Array | null> {
   if (loopback) return lbListen(timeoutMs);
   return new Promise((resolve) => {
     if (aborted) return resolve(null);
-    let done = false, ext = 0, t: any;
-    const finish = (v) => { if (done) return; done = true; clearTimeout(t); activeListen = null; stopRx(); resolve(v); };
-    // On timeout, don't abandon a frame that's actively decoding: a chirp that
-    // synced late in the window still needs ~3–4 s to finish its frame. Grant a
-    // few short extensions rather than cutting it off (that was the main reason
-    // long frames "arrived" but never completed).
-    const onTimeout = () => { if (rxInFrame() && ext++ < 3) { t = setTimeout(onTimeout, 2000); return; } finish(null); };
+    while (rxQ.length && performance.now() - rxQ[0].at > 8000) rxQ.shift(); // drop stale frames
+    if (rxQ.length) { const it = rxQ.shift()!; lastRxBand = it.band; return resolve(it.bytes); }
+    let done = false, extended = 0, t: any;
+    const finish = (v: Uint8Array | null) => {
+      if (done) return; done = true; clearTimeout(t);
+      if (rxWaiter === waiter) rxWaiter = null;
+      rxProgress = null; activeListen = null;
+      resolve(v);
+    };
+    const waiter = (item: RxItem) => finish(item.bytes);
+    rxWaiter = waiter; rxProgress = onProgress || null;
     activeListen = finish;
+    // On timeout, never abandon a frame that's mid-decode: the decoder learns the
+    // frame's length up front, so extend until its expected end (bounded, in case
+    // the sync was a false positive that never completes).
+    const onTimeout = () => {
+      const eta = rxEtaMs();
+      if (eta > 0 && extended < 15000) { const step = Math.min(eta + 400, 2500); extended += step; t = setTimeout(onTimeout, step); return; }
+      finish(null);
+    };
     t = setTimeout(onTimeout, timeoutMs);
-    startListening((bytes, band) => { lastRxBand = band; finish(bytes); }, onProgress)
-      .catch(() => finish(null)); // e.g. mic permission denied → treat as "heard nothing"
+    ensureRx().catch(() => finish(null)); // e.g. mic permission denied → treat as "heard nothing"
   });
 }
