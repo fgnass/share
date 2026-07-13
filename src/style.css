@@ -342,7 +342,17 @@ a { color: var(--accent); }
   border-bottom: 1px solid var(--border);
   font-size: 0.72rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted);
 }
-.roomhead #reconnect { margin-left: auto; padding: 6px 12px; font-size: 0.72rem; letter-spacing: 0.08em; }
+/* Combined status + action: the whole "● Connection lost · Reconnect" is one
+   ghost button. Keeps the status text at its normal muted weight and only the
+   "Reconnect" word reads as the actionable accent, so the row stays compact. */
+.roomhead #reconnect {
+  display: inline-flex; align-items: center; gap: 8px; width: auto;
+  padding: 6px 12px; font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+}
+.roomhead #reconnect .dot { margin: 0; }
+.roomhead #reconnect .rc { color: var(--accent); letter-spacing: 0.08em; }
+.roomhead #reconnect .rc::before { content: "·"; margin-right: 8px; color: var(--muted); }
 .roomhead .savedir {
   margin-left: auto; width: auto; display: inline-flex; align-items: center; gap: 6px;
   max-width: 55%; padding: 6px 12px; font-size: 0.72rem; letter-spacing: 0.06em; text-transform: none;

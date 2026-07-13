@@ -241,9 +241,17 @@ function Room() {
              onDrop={onDrop}>
       {S.dragging.value && <div class="dropzone"><Icon name="folder-down" />Drop files or a folder to send</div>}
       <div class="roomhead">
-        <span id="roomDot" class={"dot " + (rs.ok ? "ok" : "err")} />
-        <span id="roomStatus">{rs.text}</span>
-        {rs.showReconnect && <button id="reconnect" class="ghost" onClick={P.reconnect}>Reconnect</button>}
+        {rs.showReconnect
+          // Fold the status and its action into one compact control so the row
+          // doesn't overflow: "● Connection lost · Reconnect" reads as a single
+          // clickable unit and leaves room for the folder button.
+          ? <button id="reconnect" class="ghost" onClick={P.reconnect}>
+              <span class="dot err" />{rs.text}<span class="rc">Reconnect</span>
+            </button>
+          : <>
+              <span id="roomDot" class={"dot " + (rs.ok ? "ok" : "err")} />
+              <span id="roomStatus">{rs.text}</span>
+            </>}
         {S.canSaveToDir && (
           S.saveDirName.value
             ? <button class="ghost savedir set" title="Change folder" onClick={P.pickSaveDir}>
