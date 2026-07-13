@@ -69,6 +69,7 @@ function Choose() {
         <span class="dot-sep">·</span>
         <a href="https://github.com/fgnass/share/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
       </footer>
+      <p class="build" title="Build version — check it matches on both devices">{S.BUILD_ID}</p>
     </section>
   );
 }

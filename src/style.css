@@ -166,6 +166,11 @@ button.back:hover { color: var(--ink); border-color: var(--border); background: 
 #choose .foot a:hover { color: var(--ink); }
 #choose .foot svg { width: 15px; height: 15px; }
 #choose .foot .dot-sep { color: var(--border); }
+/* Build version — quiet, monospaced, centred under the footer links. */
+#choose .build {
+  text-align: center; margin-top: 8px; font-size: 0.68rem; opacity: 0.4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; user-select: all;
+}
 
 /* ── Inputs ── */
 textarea {

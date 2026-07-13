@@ -1,5 +1,12 @@
 import { signal } from "@preact/signals";
 
+// Build identifier (git hash · UTC date), injected by Vite's `define` (in both
+// dev and build). The `typeof` guard just keeps this safe if the constant is
+// ever absent (e.g. a raw test runner). Surfaced in the landing footer, logged
+// at boot, and — since it's baked into the content-hashed bundle — a device
+// pinning a stale cache will visibly show an older id than a fresh one.
+export const BUILD_ID = typeof __BUILD_ID__ === "string" ? __BUILD_ID__ : "dev";
+
 export type Screen = "choose" | "how" | "pair" | "handoff" | "room";
 export type Method = "camera" | "sound" | "link";
 export type BandMode = "auto" | "audible" | "ultrasound";
