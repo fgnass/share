@@ -369,15 +369,7 @@ a { color: var(--accent); }
 .msg .fname svg { width: 16px; height: 16px; flex: none; }
 .msg .fmeta { font-size: 0.75rem; opacity: 0.85; margin-top: 3px; }
 .msg .fmeta a { display: inline-flex; align-items: center; gap: 5px; color: inherit; font-weight: 700; text-decoration: underline; }
-/* Share/Open button styled to read like the Download link, not a pill button. */
-.msg .fmeta button.share {
-  display: inline-flex; align-items: center; gap: 5px; width: auto; margin-left: 8px;
-  padding: 0; background: none; border: 0; box-shadow: none; cursor: pointer;
-  color: inherit; font: inherit; font-weight: 700; font-size: 0.75rem;
-  text-transform: none; letter-spacing: 0; text-decoration: underline;
-}
-.msg .fmeta button.share:hover { transform: none; box-shadow: none; }
-.msg .fmeta a svg, .msg .fmeta button.share svg { width: 14px; height: 14px; }
+.msg .fmeta a svg { width: 14px; height: 14px; }
 .msg .bar { height: 5px; background: rgba(0, 0, 0, 0.25); border-radius: 999px; overflow: hidden; margin-top: 7px; }
 .msg.their .bar { background: rgba(255, 255, 255, 0.12); }
 .msg .bar > i { display: block; height: 100%; width: 0; background: currentColor; transition: width 0.1s; }

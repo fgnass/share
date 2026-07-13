@@ -7,7 +7,7 @@ export type BandMode = "auto" | "audible" | "ultrasound";
 export type Msg =
   | { id: number; kind: "sys"; text: string }
   | { id: number; kind: "chat"; mine: boolean; text: string }
-  | { id: number; kind: "file"; mine: boolean; name: string; size: number; progress: number; url?: string; file?: File; done: boolean; savedTo?: string; error?: boolean }
+  | { id: number; kind: "file"; mine: boolean; name: string; size: number; progress: number; url?: string; done: boolean; savedTo?: string; error?: boolean }
   | { id: number; kind: "batch"; mine: boolean; name: string; count: number; doneCount: number; size: number; progress: number; done: boolean; savedTo?: string; error?: boolean };
 
 export const screen = signal<Screen>("choose");

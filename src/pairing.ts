@@ -231,14 +231,13 @@ function resolveMime(name: string, given: string): string {
   return EXT_MIME[ext] || given || "application/octet-stream";
 }
 async function finalize(inc: Incoming, batch: Batch | null, closeBatch: () => void) {
-  let file: File | undefined, url: string | undefined, error = false;
+  let url: string | undefined, error = false;
   try {
     if (inc.chunks) {
       // Flatten the relative path into the download name so files from different
       // subfolders don't collide in a flat Downloads folder.
       const dl = inc.path !== inc.name ? inc.path.replace(/\//g, "_") : inc.name;
-      file = new File(inc.chunks, dl, { type: resolveMime(inc.name, inc.mime) });
-      url = URL.createObjectURL(file);
+      url = URL.createObjectURL(new File(inc.chunks, dl, { type: resolveMime(inc.name, inc.mime) }));
     } else {
       await inc.writeQ;
       await inc.writable.close();
@@ -260,7 +259,7 @@ async function finalize(inc: Incoming, batch: Batch | null, closeBatch: () => vo
     return;
   }
   if (error) S.updateMsg(inc.id, { done: true, error: true });
-  else if (inc.chunks) S.updateMsg(inc.id, { done: true, url, file, progress: 100 });
+  else if (inc.chunks) S.updateMsg(inc.id, { done: true, url, progress: 100 });
   else S.updateMsg(inc.id, { done: true, savedTo: S.saveDirName.value, progress: 100 });
 }
 

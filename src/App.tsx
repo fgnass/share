@@ -274,14 +274,6 @@ function Room() {
   );
 }
 
-// The Web Share API (with file support). Only when it exists do we offer "Open".
-const HAS_FILE_SHARE = typeof navigator.share === "function" && typeof navigator.canShare === "function";
-function canShareFile(f: File) {
-  if (!HAS_FILE_SHARE) return false;
-  try { return navigator.canShare({ files: [f] }); } catch { return false; }
-}
-async function shareFile(f: File) { try { await navigator.share({ files: [f] }); } catch { /* cancelled */ } }
-
 function Bubble({ m }: { m: S.Msg }) {
   if (m.kind === "sys") return <div class="msg sys">{m.text}</div>;
   if (m.kind === "chat") return <div class={"msg " + (m.mine ? "mine" : "their")}>{m.text}</div>;
@@ -309,15 +301,11 @@ function Bubble({ m }: { m: S.Msg }) {
       : m.url ? <a href={m.url} download={m.name}><Icon name="download" />Download</a>
       : "Sent"
     : (m.mine ? "Sending…" : "Receiving…");
-  // On Android, Share/Open hands the file to the OS sheet — handier than digging
-  // through Downloads (e.g. to install a received APK).
-  const shareable = m.done && m.file && canShareFile(m.file);
   return (
     <div class={"msg " + (m.mine ? "mine" : "their")}>
       <div class="fname"><Icon name="file" />{m.name}</div>
       <div class="fmeta">
         <span class="stat">{stat}</span>
-        {shareable && <button class="share" onClick={() => shareFile(m.file!)}><Icon name="share" />Open</button>}
         {" · "}{fmt(m.size)}
       </div>
       {!m.done && <div class="bar"><i style={`width:${m.progress}%`} /></div>}
