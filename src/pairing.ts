@@ -43,6 +43,13 @@ export async function startCamera(video: HTMLVideoElement) {
     scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
       .catch(() => navigator.mediaDevices.getUserMedia({ video: true }));
     video.srcObject = scanStream;
+    // Mirror the preview only for a front (user-facing) camera. We ask for the
+    // back camera but fall back to any camera, so trust the resolved track: on
+    // desktop the fallback lands on the user-facing webcam (mirror), on mobile
+    // we usually get "environment" (don't mirror). Absent facingMode, assume
+    // user-facing since that's the common no-back-camera case.
+    const facing = scanStream.getVideoTracks()[0]?.getSettings().facingMode;
+    video.classList.toggle("mirror", facing !== "environment");
     await video.play();
   } catch {
     S.camOn.value = false; S.camError.value = true;
