@@ -413,13 +413,29 @@ async function mintOffer() {
   bc.onmessage = (e) => {
     if (e.data.type === "answer" && role === "offerer" && !applied) {
       bc.postMessage({ type: "ack" });
-      applyAnswer({ type: "answer", sdp: e.data.sdp } as any);
+      void applyAnswer({ type: "answer", sdp: e.data.sdp } as any);
     }
   };
 }
-async function applyAnswer(sdp: RTCSessionDescriptionInit) {
-  if (applied) return; applied = true; committed = true;
-  await pc!.setRemoteDescription(sdp);
+// Commit only once the remote description is actually accepted. Setting
+// `applied` up front and then failing the await wedged the offerer for good:
+// `applied` stayed true so every later answer hit the "already applied" branch,
+// and the scanned code was already in `handled` so re-reading the same QR was
+// suppressed too. The only way out was re-minting the offer — which is exactly
+// the "scan the Mac's code a second time and then it works" symptom.
+async function applyAnswer(sdp: RTCSessionDescriptionInit, code?: string) {
+  if (applied) return;
+  try {
+    await pc!.setRemoteDescription(sdp);
+  } catch (e) {
+    slog("applyAnswer failed", e);
+    console.error("[share] could not apply their answer", e);
+    // Let the same QR be picked up again on the next camera frame.
+    if (code) handled.delete(code);
+    setStatus("Couldn't read their reply. Keep the codes in view.", "err");
+    return;
+  }
+  applied = true; committed = true;
   setStatus("Connecting…");
   armPairWatch();
 }
@@ -473,13 +489,22 @@ function onScan(parsed: { type: string; code: string }, manual = false) {
   // STUN propagation: a peer's code carrying a reflexive (srflx) candidate means
   // it turned STUN on. A one-sided srflx rarely connects, so we adopt it too and
   // regenerate our side with STUN — which then carries srflx to them in turn.
-  if (!S.useStun.value && dec.sdp.includes("typ srflx")) {
+  //
+  // But NEVER re-mint over an answer we can actually use. An answer completes the
+  // exchange; discarding it to gather srflx invalidates the very offer that answer
+  // replies to, so our QR silently changes and the peer's displayed code is now
+  // stale — the user sees "nothing happens" and has to scan our code a second
+  // time. Apply the answer and let armPairWatch escalate to STUN only if the
+  // direct attempt really fails. (An srflx answer also means the peer can reach
+  // us reflexively already, so the direct attempt is well worth making.)
+  const usableAnswer = parsed.type === "a" && role === "offerer" && !applied;
+  if (!S.useStun.value && dec.sdp.includes("typ srflx") && !usableAnswer) {
     S.useStun.value = true; S.stunPrompt.value = false; handled.clear();
     if (role === "offerer") { mintOffer(); return; } // re-mint so our offer has srflx too
     // answerer: fall through — becomeAnswerer below rebuilds the answer with STUN on.
   }
   if (parsed.type === "a") {               // an answer
-    if (role === "offerer" && !applied) { slog("apply their answer → connecting"); applyAnswer(dec as any); }
+    if (role === "offerer" && !applied) { slog("apply their answer → connecting"); applyAnswer(dec as any, parsed.code); }
     else if (role === "answerer" && !applied && !entered && myNonce > dec.nonce) {
       slog("both answered → higher nonce reverts to offerer"); committed = false; role = "offerer"; mintOffer();
     }
