@@ -286,7 +286,16 @@ textarea:focus { outline: none; border-color: var(--accent); }
    shows through. */
 .soundbtn.indet .soundfill { clip-path: inset(0 100% 0 0); animation: none; }
 .soundbtn.indet::after {
-  content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit;
+  content: ""; position: absolute; z-index: 0;
+  /* Overhang the pill by a whole stripe period on each side and let the parent's
+     overflow:hidden do the rounding. Previously ::after took border-radius:inherit
+     (999px): the 23px semicircular cap is wider than one 18px stripe period, so the
+     curve ate a changing fraction of the first stripe as the pattern scrolled — that
+     was the "jump" at the left edge, not a tiling error. Overhanging means every stripe
+     the user can see is a full one, and the pill's own curve clips cleanly. */
+  /* Exactly one horizontal period (18 × √2) so the overhang itself lands on a stripe
+     boundary and the animation still closes seamlessly. */
+  inset: 0 -25.4558px;
   /* 45° so the horizontal repeat is exactly stripe-period × √2. No background-size:
      a repeating gradient already tiles infinitely, and forcing a size that isn't the
      true period puts a visible seam at every tile edge — at -60deg an 18px stripe pair
