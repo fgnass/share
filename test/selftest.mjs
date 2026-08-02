@@ -335,6 +335,22 @@ console.log("\n── step rail ──");
   ok(milestone("o") === "offer", "an offer code ⇒ Offer, whoever produced it");
   ok(milestone("a") === "reply", "an answer code ⇒ Reply, whoever produced it");
 
+  // Receiving must advance the rail too, not just sending. A code frame is seconds of
+  // air time: the sender showed "Offer" while the receiver still sat on "Check" for the
+  // whole transfer, looking stuck. Any frame arriving proves our mic works, which is
+  // exactly what Check asks — so reception clears the gate immediately.
+  {
+    const recv = (etaMs) => {
+      const out = { step: "offer", narrated: false };   // gate always clears
+      if (etaMs > 900) out.narrated = true;             // only long frames get a label
+      return out;
+    };
+    ok(recv(4000).step === "offer", "receiving a frame clears the Check gate");
+    ok(recv(4000).narrated, "a long (code) frame is narrated with progress");
+    ok(!recv(200).narrated, "a 3-byte beacon is NOT narrated (would flash and vanish)");
+    ok(recv(200).step === "offer", "  …but a beacon still clears the gate");
+  }
+
   const st = mk();
   st.set("offer"); ok(st.get() === "offer", "check → offer advances");
   st.set("check"); ok(st.get() === "offer", "offer → check is IGNORED (a resend must not rewind)");

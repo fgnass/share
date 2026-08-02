@@ -761,6 +761,28 @@ function proveSpeaker(why: string) {
   slog(`speaker proven end-to-end by peer's ${why}`);
 }
 
+// Progress callback for a listen: report a frame WHILE it arrives, not only once it
+// decodes. A code frame is several seconds of air time, so without this the receiving
+// device sat on "Check" showing nothing — looking stuck — for the whole transfer, while
+// the sender had already moved on. Any frame arriving is also proof our own mic works,
+// which is exactly what the Check gate asks.
+//
+// Only long frames get narrated: beacons are 3 bytes and finish almost immediately, so
+// announcing a code transfer for one would flash a message that's both wrong and gone
+// before it can be read. rxEtaMs() is the decoder's own estimate of the time remaining
+// in the frame it locked onto.
+const receiving = (label: string) => (frac: number) => {
+  micOk = true; micDead = false; S.audioTrouble.value = false;
+  setStep("offer");
+  if (rxEtaMs() > 900) { setAudioStatus(label); setProgress(frac); }
+};
+// Same, for the offerer awaiting the answer: what's arriving is the reply, so the rail
+// advances a step further.
+const receivingReply = (frac: number) => {
+  receiving("Receiving their reply…")(frac);
+  if (rxEtaMs() > 900) setStep("reply");
+};
+
 // Transmit a frame while shadow-capturing the mic, and fold the result into the
 // capability evidence. This is the ONLY capability test: every frame we send is
 // also a check that our speaker works, so there is no separate probe phase.
@@ -825,7 +847,8 @@ export async function soundAuto() {
       setAudioStatus(micDead ? "Can't hear the mic — check microphone access for this site."
         : volumeLow() ? "Turn the volume up — this device can't hear itself."
         : "Looking for the other device…");
-      const f = await hear(rand(2500, 2500));
+      const f = await hear(rand(2500, 2500), receiving("Receiving their code…"));
+      setProgress(null);
       if (!alive()) break;
       slog("discover heard", heardStr(f));
       if (f) route(f);
@@ -877,7 +900,7 @@ export async function soundAuto() {
         // have received it → re-offer right away.
         let until = performance.now() + rand(7000, 2000);
         while (alive() && !applied && performance.now() < until) {
-          const f = await hear(until - performance.now(), setProgress);
+          const f = await hear(until - performance.now(), receivingReply);
           setProgress(null);
           if (!alive()) break;
           slog("offerer heard", heardStr(f));
@@ -922,7 +945,7 @@ export async function soundAuto() {
           await sendHeard(ackFrame());
           if (!alive()) break;
         }
-        const f = await hear(building ? 500 : rand(6000, 3000), setProgress);
+        const f = await hear(building ? 500 : rand(6000, 3000), receiving("Receiving their code…"));
         setProgress(null);
         if (!alive()) break;
         if (f) slog("answerer heard", heardStr(f));
