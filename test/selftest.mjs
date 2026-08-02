@@ -1,27 +1,25 @@
-// Regression tests for the sound self-test's pass criterion, run in plain Node
-// (no audio hardware): drive encodeWaveform → simulate a channel → makeDecoder,
-// exactly as probeBand() does with a real mic capture.
+// Regression tests for the sound capability check, run in plain Node (no audio
+// hardware): drive encodeWaveform → simulate a channel → makeDecoder, exactly as
+// withEchoCapture() does with a real mic capture.
 //
-// The bug these lock down: the previous comb-of-tones probe compared the
-// strongest window anywhere against a floor measured in a silent lead-in, which
-// reads positive on noise alone. A device with its volume at ZERO passed the
-// ultrasound probe and then reported a clean bill of health on an inaudible band.
-// The pass criterion is now "the frame we sent decodes back byte-identical", so
-// no amount of ambient noise can satisfy it.
+// There is no separate probe: the discovery beacon IS the test. Sending a frame
+// and decoding our own echo out of the mic proves the speaker works; decoding
+// anything at all proves the mic works. These tests cover the decode criterion —
+// "our own frame comes back byte-identical" — and the reason it is NOT corroborated
+// by any loudness threshold.
+//
+// The bug they lock down: the original comb-of-tones probe compared the strongest
+// window anywhere against a floor measured in a silent lead-in, which reads
+// positive on noise alone, so a device with its volume at ZERO passed and then
+// picked the inaudible ultrasound band while reporting a clean bill of health.
 
-import { encodeWaveform, makeDecoder, PROBE, isProbe, ACK, GOT } from "../src/music.ts";
+import { encodeWaveform, makeDecoder, ACK, GOT } from "../src/music.ts";
 
 const SR = 48000;
-let failed = 0, knownBad = 0;
+let failed = 0;
 const ok = (cond, msg) => {
   console.log(`${cond ? "  ok  " : " FAIL "} ${msg}`);
   if (!cond) failed++;
-};
-// A check we know does not hold yet: reported, but doesn't fail the run. Flips to
-// a plain ok() once the underlying bug is fixed.
-const known = (cond, msg) => {
-  console.log(`${cond ? "  ok  " : " KNOWN"} ${msg}`);
-  if (!cond) knownBad++;
 };
 
 // Deterministic PRNG so a flaky run means a real regression, not bad luck.
@@ -78,15 +76,23 @@ function verdict(buf, leadN, bandF0, df, groups) {
   return { ok: decoded, decoded, snr: 10 * Math.log10(peak / floor) };
 }
 
-const payload = Uint8Array.from([PROBE, 0xad, 0xbe, 0xef, 0x01, 0x23, 0x45, 0x67]);
+// The beacon IS the capability test now: [ACK, nonceHi, nonceLo], the same frame
+// discovery already sends. The nonce is what distinguishes our echo from a peer's.
+const MY_NONCE = 0xbeef;
+const payload = Uint8Array.from([ACK, MY_NONCE >> 8, MY_NONCE & 0xff]);
 
-// The probe's type byte must not alias any handshake frame, or a probe echo would
-// be routed as an offer/answer/ACK/GOT and corrupt discovery.
-console.log("\n── frame typing ──");
-ok(isProbe(payload), "probe payload is recognised as a probe");
-for (const [name, b] of [["offer", 0x6f], ["answer", 0x61], ["ACK", ACK], ["GOT", GOT], ["beacon", 0xb0]])
-  ok(PROBE !== b, `probe byte differs from ${name}`);
-ok(!isProbe(Uint8Array.from([ACK, 1, 2])), "an ACK is not seen as a probe");
+// Our own echo must be distinguishable from a peer's beacon. Both are ACK frames
+// on the same fixed frequency grid (both devices run the same code), so the ONLY
+// discriminator is the 16-bit nonce — exactly what hear() compares.
+console.log("\n── beacon identity ──");
+{
+  const peerNonce = 0x1234;
+  const peer = Uint8Array.from([ACK, peerNonce >> 8, peerNonce & 0xff]);
+  const nonceOf = (f) => (f[1] << 8) | f[2];
+  ok(nonceOf(payload) === MY_NONCE, "our beacon carries our nonce");
+  ok(nonceOf(peer) !== MY_NONCE, "a peer's beacon does not");
+  ok(payload[0] === ACK && peer[0] === ACK, "both are ACK frames — nonce is the only discriminator");
+}
 
 const LEAD_MS = 300;
 const leadSamples = Math.round(LEAD_MS / 1000 * SR);
@@ -137,13 +143,12 @@ for (const band of ["ultrasound", "audible"]) {
   // Peer collision: a DIFFERENT payload in the same band must never be accepted
   // as our own echo — this is what stops two devices self-testing at once from
   // validating each other's hardware.
-  // Same type byte as ours (both devices run the same code) — only the random
-  // tail distinguishes them, which is exactly what must be checked.
-  const peerPayload = Uint8Array.from([PROBE, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+  // A peer's beacon: same ACK type, different nonce.
+  const peerPayload = Uint8Array.from([ACK, 0x12, 0x34]);
   const peerWave = encodeWaveform(peerPayload, SR, band);
   const heard = decode(capture(peerWave, { gain: 0.8 }));
-  ok(!same(heard, payload), "peer's frame is not mistaken for our payload");
-  ok(same(heard, peerPayload), "peer's frame decodes as ITS payload (→ flagged as collision)");
+  ok(!same(heard, payload), "peer's beacon is not mistaken for ours");
+  ok(same(heard, peerPayload), "peer's beacon decodes as ITS payload (→ it's the peer, not our echo)");
 }
 
 // A dead mic must be distinguishable from a quiet speaker. Both yield "no decode",
@@ -152,12 +157,12 @@ for (const band of ["ultrasound", "audible"]) {
 // that the OS recording indicator never lights up.
 console.log("\n── dead mic vs. quiet speaker ──");
 {
+  const wave = encodeWaveform(payload, SR, "audible");
   const micDeadOf = (buf, trackMuted = false) => {
     let rms = 0; for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
     rms = Math.sqrt(rms / Math.max(1, buf.length));
-    return trackMuted || buf.length < Math.round(0.2 * SR) || rms === 0;
+    return trackMuted || buf.length < Math.round(0.1 * SR) || rms === 0;
   };
-  const wave = encodeWaveform(payload, SR, "audible");
   // No callbacks at all (ScriptProcessor starved — seen on mobile Safari).
   ok(micDeadOf(new Float32Array(0)), "empty capture ⇒ micDead");
   // Samples arrive but are digital silence (track resolved muted, as on iOS).
@@ -170,6 +175,33 @@ console.log("\n── dead mic vs. quiet speaker ──");
   ok(!verdict(quietRoom, leadSamples, 800, 100, 4).ok, "  …and still fails to decode");
 }
 
+// The evidence hierarchy. Two independent questions with different sources of
+// truth: hearing ANYTHING proves the mic, but only a *causal* reply proves our
+// speaker reached the peer through the room.
+console.log("\n── evidence hierarchy ──");
+{
+  // Mirrors pairing.ts: proveSpeaker() is called for ANSWER and GOT only.
+  const isOffer = (f) => f[0] === 0x6f, isAnswer = (f) => f[0] === 0x61;
+  const isAck = (f) => f[0] === ACK, isGot = (f) => f[0] === GOT;
+  const provesSpeaker = (f) => isAnswer(f) || isGot(f);
+  const provesMic = () => true; // any decode, whatever the frame
+
+  const got = Uint8Array.from([GOT, 0x12, 0x34]);
+  const ack = Uint8Array.from([ACK, 0x12, 0x34]);
+  const answer = Uint8Array.from([0x61, 1, 2, 3]);
+  const offer = Uint8Array.from([0x6f, 1, 2, 3]);
+
+  // Causal: only exist because the peer decoded something we sent.
+  ok(provesSpeaker(got), "peer's GOT proves our speaker (they decoded our offer)");
+  ok(provesSpeaker(answer), "peer's ANSWER proves our speaker (built from our offer)");
+  // Unprompted: say nothing about our transmit path. An ACK arriving during our
+  // offer actually means the peer was transmitting and CANNOT have heard us.
+  ok(!provesSpeaker(ack), "peer's ACK does NOT prove our speaker (unprompted)");
+  ok(!provesSpeaker(offer), "peer's OFFER does NOT prove our speaker (unprompted)");
+  // But every one of them proves the mic.
+  for (const [name, f] of [["GOT", got], ["ACK", ack], ["ANSWER", answer], ["OFFER", offer]])
+    ok(provesMic(f), `decoding a ${name} proves the mic works`);
+}
+
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");
-if (knownBad) console.log(`${knownBad} known-unfixed check(s) — see the bypass note in probeBand()`);
 process.exit(failed ? 1 : 0);

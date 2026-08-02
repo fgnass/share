@@ -23,8 +23,7 @@ export function App() {
     });
     Music.setDebugSink((e: any) => {
       if (e.t === "spectrum") { S.dbgSpectrum.value = e; S.dbgState.value = e.state; }
-      else if (e.t === "selftest") { S.dbgSelfTest.value = e.report; S.dbgPush(`self-test → ${e.report.recommend}${e.report.quiet ? " (quiet!)" : ""}`); console.log("%c[codec] self-test", "color:#acff69", e.report); }
-      else if (e.t === "probe") { S.dbgPush(`probe ${e.band}: ${e.ok ? "DECODED" : e.peer ? "peer" : "no decode"} snr ${e.snr.toFixed(1)}dB rms ${e.rms.toExponential(1)} lead ${e.leadRms.toExponential(1)} n=${e.samples}`); console.log("%c[codec] probe", "color:#ffd479", e); }
+      else if (e.t === "selfheard") { S.dbgPush(`self-heard: ${e.heard ? "yes" : e.micDead ? "MIC DEAD" : "no"} (n=${e.samples}, rms ${e.rms.toExponential(1)})`); console.log("%c[codec] self-heard", "color:#ffd479", e); }
       else if (e.t === "sync") { S.dbgPush(`sync locked · ${e.band}`); console.log("%c[codec] sync locked", "color:#acff69", e.band, "corr", e.corr); }
       else if (e.t === "frame") { const s = e.ok ? "OK ✓" : e.corrected ? "CRC FAIL ✗" : "RS FAIL ✗"; S.dbgPush(`frame ${s} · ${e.band} · ${e.len}B (${e.bytes}B coded)`); console.log("%c[codec] frame " + s, "color:#acff69", { band: e.band, len: e.len, coded: e.bytes, rsDecoded: e.corrected }); }
     });
@@ -343,14 +342,24 @@ function SpecRow({ label, fr, d, max }: any) {
 
 function DebugPanel() {
   const spec = S.dbgSpectrum.value;
-  const st = S.dbgSelfTest.value;
   const log = S.dbgLog.value;
   const mon = S.dbgMonitor.value;
   const [busy, setBusy] = useState(false);
 
+  // There is no standalone self-test any more: the capability check only exists as
+  // a side effect of transmitting. So send one beacon in each band and report what
+  // came back — exactly what the pairing loop does every round.
   const runTest = async () => {
-    setBusy(true); S.dbgPush("running self-test…");
-    try { await Music.selfTest(); } catch (e) { S.dbgPush("self-test failed: " + e); }
+    setBusy(true);
+    for (const band of ["ultrasound", "audible"]) {
+      Music.setUltrasound(band === "ultrasound");
+      const payload = new Uint8Array([0xac, 0x00, 0x00]);
+      crypto.getRandomValues(payload.subarray(1));
+      try {
+        const r = await Music.withEchoCapture(payload, () => Music.playFrame(payload));
+        S.dbgPush(`${band}: ${r.heard ? "heard own beacon" : r.micDead ? "MIC DEAD" : "not heard"}`);
+      } catch (e) { S.dbgPush(`${band}: failed — ${e}`); }
+    }
     setBusy(false);
   };
   const toggleMon = async () => {
@@ -376,20 +385,6 @@ function DebugPanel() {
         <div class="specwrap">
           <SpecRow label="aud" fr={FREQS.audible} d={spec.spectrum.audible} max={max} />
           <SpecRow label="ult" fr={FREQS.ultrasound} d={spec.spectrum.ultrasound} max={max} />
-        </div>
-      )}
-      {st && (
-        <div class="dbgtest">
-          {st.bands.map((b: any) => (
-            <div class="tband">
-              <span class={"tname " + (b.ok ? "ok" : "bad")}>
-                {b.name} · {b.ok ? "decoded own frame" : b.peer ? "peer's frame (collision)" : "no decode"} · {b.snr.toFixed(0)}dB
-                {" · rms "}{b.rms?.toExponential(1)} lead {b.leadRms?.toExponential(1)} n={b.samples}
-                {b.micDead ? " · MIC DEAD" : ""}
-              </span>
-            </div>
-          ))}
-          <span class="trec">→ <b>{st.recommend}</b>{st.quiet ? " (too quiet — turn up volume)" : ""}{st.micDead ? " (MIC DEAD — no audio captured)" : ""}{st.peer ? " (peer probing)" : ""}</span>
         </div>
       )}
       <div class="dbglog">{log.map((l) => <div>{l}</div>)}</div>

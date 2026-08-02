@@ -75,7 +75,6 @@ export const debug = new URLSearchParams(location.search).has("debug");
 export const loopbackMode = new URLSearchParams(location.search).has("loopback");
 export const dbgSpectrum = signal<any>(null);   // latest {sr, state, spectrum:{audible,ultrasound}}
 export const dbgState = signal<string>("idle");
-export const dbgSelfTest = signal<any>(null);   // latest SelfTest report
 export const dbgMonitor = signal(false);        // standalone live monitor running
 export const dbgLog = signal<string[]>([]);
 export function dbgPush(line: string) {

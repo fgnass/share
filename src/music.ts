@@ -358,7 +358,11 @@ async function ensureRx(): Promise<void> {
       if (w) w(item); else rxQ.push(item);
     }, (f) => { if (rxProgress) rxProgress(f); });
     rxDec = dec;
-    rxNode.onaudioprocess = (e) => dec.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    rxNode.onaudioprocess = (e) => {
+      const chunk = new Float32Array(e.inputBuffer.getChannelData(0));
+      if (echoCap) echoCap.push(chunk);   // shadow copy while WE transmit (see selfHeard)
+      dec.push(chunk);
+    };
     rxMute = c.createGain(); rxMute.gain.value = 0; // keep the processor pulling without echoing to speakers
     rxSrc.connect(rxNode); rxNode.connect(rxMute); rxMute.connect(c.destination);
   })().finally(() => { rxStarting = null; });
@@ -376,229 +380,85 @@ function stopRx() {
 
 export function stopAudio() { stopTx(); stopRx(); }
 
-// ── Capability self-test (loopback) ─────────────────────────────────────────
-// Transmit a REAL frame in the candidate band and try to decode our own echo.
-// Tells us (a) which band this device can actually hear itself on and (b) whether
-// it's loud enough. It characterises THIS device's hardware — a good proxy for
-// whether it can take part in a band at all: if your own mic can't hear your own
-// 17 kHz, it won't hear the peer's either.
+// ── Self-hearing (the beacon IS the capability test) ────────────────────────
+// There is no separate probe any more. Every frame we transmit is also a test of
+// our own speaker: the mic stays open while we play (the persistent rx session),
+// so our own signal comes back through the room and can be decoded like any other
+// frame. `withEchoCapture` buffers the mic during a transmission and decodes that
+// buffer AFTERWARDS, on a throwaway decoder.
 //
-// Why a frame and not a comb of bare tones (the previous design): a comb only
-// answers "does bin N have power?", which the old code decided by comparing the
-// strongest window ANYWHERE against a floor measured in a silent lead-in. That
-// ratio is biased wide open — max-of-many vs. mean-of-few reads ~+6 dB on pure
-// noise — so a device with its volume at ZERO passed the ultrasound probe as soon
-// as the room was slightly louder after the lead-in than during it, then picked
-// the inaudible band and reported a clean bill of health. Round-tripping a frame
-// removes the whole class of bug: the pass criterion is CRC/RS validity of a
-// payload we chose, so nothing but our own signal can satisfy it.
+// Why a shadow decoder instead of just reading the live one: playFrame() calls
+// rxDec.reset() the instant transmission ends, deliberately dropping the in-flight
+// echo so the decoder is immediately ready for the peer's reply chirp. That reset
+// is what fixed the missed-chirp livelock (a peer's answer follows a GOT within
+// ~100 ms, and losing that 80 ms chirp costs the multi-second frame behind it).
+// Decoding the echo off the hot path keeps that fix untouched: the live decoder
+// still resets, and the capability verdict is computed from a copy.
 //
-// It also solves peer collision. Both devices run this at the same time (you tap
-// Pair on both), on the same fixed frequency grid, so any energy-based test can
-// mistake the PEER's probe for its own echo. Our payload is random, and the codec
-// already authenticates it end-to-end (crc8 + Reed-Solomon), so a decode that
-// isn't byte-identical to what we sent is definitively not ours — we report the
-// collision instead of scoring it as success. Identical logic in both bands:
-// encodeWaveform() takes the band and the decoder auto-detects it from disjoint
-// chirp sweeps, so there are no per-band amplitudes or bin subsets to tune.
+// This replaces a two-phase design (probe, then discover) that cost ~2.4s of
+// startup and re-probed on a timer to keep its verdict fresh. Folding the test
+// into the beacon makes staleness structurally impossible — the verdict is a
+// property of the last frame sent, not a flag that has to be invalidated.
 const MIC = { echoCancellation: false, autoGainControl: false, noiseSuppression: false };
 const naptime = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export type BandTest = {
-  name: string;
-  ok: boolean;           // decoded our own frame back
-  peer: boolean;         // decoded SOMEONE ELSE's frame → their self-test overlapped ours
-  snr: number;           // in-band energy during TX vs. ambient floor before it, dB
-  rms: number;           // RMS of the whole capture (diagnostic)
-  leadRms: number;       // RMS of the pre-TX ambient window (diagnostic)
-  samples: number;       // capture length (0 ⇒ the mic delivered nothing)
-  micDead: boolean;      // mic never produced usable audio → NOT a volume problem
-};
-export type SelfTest = {
-  sampleRate: number; bands: BandTest[]; recommend: string;
-  quiet: boolean;   // no band round-tripped → tell the user to turn it up
-  micDead: boolean; // the mic never delivered usable audio → not a volume problem
-  peer: boolean;
-};
+// Mic samples captured during our own transmission, or null when not capturing.
+let echoCap: Float32Array[] | null = null;
 
-// Self-test frames carry their own type byte so the handshake can't mistake one
-// for a control frame. The probe plays its buffer directly (not via playFrame),
-// so the persistent rx decoder hears it too and can surface it as a normal frame;
-// with a distinct first byte it's simply ignored by route(), whereas a fully
-// random payload would occasionally start with 0x6f/0x61/0xac/0x67 and be read as
-// an offer/answer/ACK/GOT. The remaining bytes stay random — that's the identity
-// that tells our own echo from a peer's simultaneous probe.
-export const PROBE = 0x70;
-const SELFTEST_BYTES = 8;
-export const isProbe = (b: Uint8Array | null): boolean => !!b && b[0] === PROBE;
+// Run `send` with the mic shadow-captured, then report whether our own `payload`
+// decoded out of that capture. Returns:
+//   heard    — our frame decoded back ⇒ speaker + mic + this band all work
+//   micDead  — the capture had no usable audio at all (see below) ⇒ mic problem,
+//              which says NOTHING about the speaker, so it must not be reported
+//              as "too quiet".
+// A mic that works always delivers samples with a non-zero noise floor, so an
+// empty or exactly-silent capture means we never heard anything — ours or anyone
+// else's. On iOS a track can resolve already muted (or go muted when another app
+// takes the mic, or on an incoming call) with no exception thrown, and the
+// give-away is the OS recording indicator never appearing.
+export async function withEchoCapture(
+  payload: Uint8Array,
+  send: () => Promise<void>,
+): Promise<{ heard: boolean; micDead: boolean }> {
+  if (loopback) { await send(); return { heard: true, micDead: false }; } // no acoustic path to test
+  const c = audioCtx();
+  if (c.state !== "running") { await send(); return { heard: false, micDead: false }; } // suspended ⇒ inconclusive
+  // The capture rides on the persistent rx session, so it has to be open BEFORE we
+  // transmit. In the pairing loop hear() has usually opened it already, but the
+  // first beacon can precede any listen — without this the capture is empty and we
+  // would report micDead on a perfectly good mic.
+  try { await ensureRx(); } catch { return { heard: false, micDead: true }; } // permission denied etc.
+  const cap: Float32Array[] = [];
+  echoCap = cap;
+  try {
+    await send();
+    // Keep capturing past the end of playback: propagation delay plus the last
+    // symbols still in the air mean the tail of our own frame arrives at the mic
+    // AFTER the buffer source has finished. Cutting the capture at send() clips it
+    // and the frame never decodes — a false "not heard" on a perfectly loud device.
+    await naptime(250);
+  } finally { if (echoCap === cap) echoCap = null; }
 
-const bytesEqual = (a: Uint8Array, b: Uint8Array) =>
-  a.length === b.length && a.every((v, i) => v === b[i]);
-
-// Total in-band power over samples[start..start+n), summed across a band's bins.
-// Used only for the muted/too-quiet verdict — never as the pass criterion.
-const bandPower = (buf: Float32Array, start: number, n: number, sr: number, B): number => {
-  if (start < 0 || start + n > buf.length || n <= 0) return 1e-12;
-  let sum = 0;
-  for (const f of binFreqs(B)) sum += goertzel(buf, start, n, f, sr);
-  return Math.max(sum, 1e-12);
-};
-
-// Play one self-test frame in `mode` while capturing our own mic, then decode the
-// capture offline. Returns the decode outcome plus a crude in-band SNR.
-async function probeBand(c, mode: string, payload: Uint8Array): Promise<BandTest> {
-  const sr = c.sampleRate, B = BANDS[mode];
-  const data = encodeWaveform(payload, sr, mode);
-
-  const chunks: Float32Array[] = [];
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC });
-  // A resolved getUserMedia does NOT mean we have working audio. On iOS Safari the
-  // track can come back already muted (or go muted when another app holds the mic,
-  // or on an incoming call), in which case the capture is digital silence and every
-  // band "fails" — which the caller would otherwise report as "turn the volume up"
-  // on a device whose volume is fine. The tell-tale is the OS recording indicator
-  // never appearing. Record the track state so the caller can tell the two apart.
-  const track = stream.getAudioTracks()[0];
-  const trackMuted = !track || track.muted || !track.enabled || track.readyState !== "live";
-  const src = c.createMediaStreamSource(stream);
-  const node = c.createScriptProcessor(2048, 1, 1);
-  node.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-  const mute = c.createGain(); mute.gain.value = 0;
-  src.connect(node); node.connect(mute); mute.connect(c.destination);
-
-  // Record ambient for a moment BEFORE emitting, so the floor is measured on the
-  // same open stream (mic gain has already settled) rather than in a lead-in that
-  // sits in the middle of getUserMedia's ramp-up.
-  await naptime(300);
-  const floorEnd = chunks.reduce((n, ch) => n + ch.length, 0);
-
-  const buffer = c.createBuffer(1, data.length, sr);
-  buffer.getChannelData(0).set(data);
-  const bsrc = c.createBufferSource(); bsrc.buffer = buffer; bsrc.connect(c.destination);
-  await new Promise<void>((res) => { bsrc.onended = () => res(); bsrc.start(); });
-  await naptime(250); // let the tail (and any reverb) land in the capture
-  node.onaudioprocess = null; src.disconnect(); node.disconnect(); mute.disconnect();
-  stream.getTracks().forEach((t) => t.stop());
-
-  let total = 0; for (const ch of chunks) total += ch.length;
+  let total = 0; for (const ch of cap) total += ch.length;
   const buf = new Float32Array(total);
-  { let o = 0; for (const ch of chunks) { buf.set(ch, o); o += ch.length; } }
+  { let o = 0; for (const ch of cap) { buf.set(ch, o); o += ch.length; } }
 
-  // Decode the capture with a throwaway decoder — the real rx session may be
-  // running, and we want this measurement isolated from it.
-  let got: Uint8Array | null = null;
-  const dec = makeDecoder(sr, (bytes) => { if (!got) got = bytes; });
-  for (let p = 0; p < buf.length; p += 2048) dec.push(buf.slice(p, Math.min(p + 2048, buf.length)));
-
-  const ok = !!got && bytesEqual(got, payload);
-  const peer = !!got && !ok;
-
-  // Diagnostics: a muted device must not decode. If it does, the signal reached
-  // the decoder without crossing the room — report the raw levels so we can see
-  // WHERE from (see the "muted but decodes" note on probeBand).
+  const sr = c.sampleRate;
+  const track = rxStream?.getAudioTracks()[0];
   let rms = 0; for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
   rms = Math.sqrt(rms / Math.max(1, buf.length));
-  let leadRms = 0; for (let i = 0; i < Math.min(floorEnd, buf.length); i++) leadRms += buf[i] * buf[i];
-  leadRms = Math.sqrt(leadRms / Math.max(1, Math.min(floorEnd, buf.length)));
+  const micDead = !track || track.muted || !track.enabled || track.readyState !== "live"
+    || buf.length < Math.round(0.1 * sr) || rms === 0;
 
-  // SNR: in-band power while we were transmitting vs. the pre-TX ambient floor.
-  const win = Math.min(Math.round(0.06 * sr), Math.max(1, floorEnd));
-  const floor = bandPower(buf, Math.max(0, floorEnd - win), win, sr, B);
-  let peak = 1e-12;
-  for (let s = floorEnd; s + win <= buf.length; s += win) {
-    const p = bandPower(buf, s, win, sr, B); if (p > peak) peak = p;
+  let heard = false;
+  if (!micDead) {
+    const dec = makeDecoder(sr, (bytes) => {
+      if (bytes.length === payload.length && bytes.every((v, i) => v === payload[i])) heard = true;
+    });
+    for (let p = 0; p < buf.length; p += 2048) dec.push(buf.slice(p, Math.min(p + 2048, buf.length)));
   }
-  const snr = 10 * Math.log10(peak / floor);
-
-  // Did the MIC work at all? Distinct from "did the speaker work": a real mic
-  // always delivers samples with a non-zero noise floor, so no callbacks at all
-  // (ScriptProcessor starved — common on mobile Safari when the page isn't fully
-  // foreground) or an exactly-silent buffer means we never heard anything, ours or
-  // otherwise. Reporting that as "too quiet" is wrong and unactionable: the user
-  // turns the volume up and nothing changes.
-  const expected = Math.round(0.2 * sr); // ≪ the ~0.55s+ a real capture yields
-  const micDead = trackMuted || buf.length < expected || rms === 0;
-
-  // `ok` is the decode and nothing else. snr/rms/leadRms are DIAGNOSTICS ONLY —
-  // never gates. On a muted device they swing across ±25 dB run to run (estimator
-  // noise on a sub-second capture), so any threshold over them mis-classifies a
-  // large fraction of runs; the decode was right 16/16 in the same experiment.
-  const b: BandTest = { name: mode, ok, peer, snr, rms, leadRms, samples: buf.length, micDead };
-  dbg({ t: "probe", band: mode, ...b });
-  return b;
-}
-
-// `only` restricts the probe to a single band (the user chose it explicitly, so
-// there is no band decision left — we're only checking the speaker is audible).
-export async function selfTest(only?: string): Promise<SelfTest> {
-  const c = audioCtx();
-  await c.resume().catch(() => {});
-  // A suspended context emits NOTHING while the mic still captures normally, so
-  // every band would "fail" and we'd tell a perfectly loud phone to turn it up.
-  // Mobile browsers suspend the context unless resume() happens inside a user
-  // gesture, and they re-suspend it when the page backgrounds. Treat it as
-  // inconclusive rather than a volume problem.
-  if (c.state !== "running") {
-    const report: SelfTest = {
-      sampleRate: c.sampleRate, bands: [], recommend: "nocontext",
-      quiet: false, micDead: false, peer: false,
-    };
-    dbg({ t: "selftest", report, ctxState: c.state });
-    return report;
-  }
-  const bands: BandTest[] = [];
-  const probe = async (mode: string): Promise<BandTest> => {
-    const payload = new Uint8Array(SELFTEST_BYTES);
-    crypto.getRandomValues(payload);
-    payload[0] = PROBE;
-    const b = await probeBand(c, mode, payload);
-    bands.push(b);
-    return b;
-  };
-  // `only` pins the probe to one band: the user picked it explicitly, so we're not
-  // choosing a band any more, just checking whether anything comes back out of the
-  // speaker. Never probe the other band in that case — trying ultrasound when the
-  // user asked for audible would emit sound they didn't ask for and could recommend
-  // a band they rejected.
-  if (only) {
-    const b = await probe(only);
-    const report: SelfTest = {
-      sampleRate: c.sampleRate, bands,
-      recommend: b.ok ? only : b.micDead ? "nomic" : "louder",
-      quiet: !b.ok && !b.micDead, micDead: b.micDead, peer: b.peer,
-    };
-    dbg({ t: "selftest", report });
-    return report;
-  }
-  // Ultrasound first: it's inaudible, so on capable hardware the whole self-test
-  // makes no audible sound at all. Only if ultrasound fails do we try the audible
-  // band.
-  const us = await probe("ultrasound");
-  let aud: BandTest | null = null;
-  if (!us.ok) aud = await probe("audible");
-
-  // quiet is derived ONLY from whether a frame decoded, never from a level/SNR
-  // threshold. Measured on a muted MacBook Air: across 16 probes `decoded` was
-  // false 16/16 (correct), while the in-band SNR metric ranged −5.9…+24.2 dB and
-  // crossed a 4 dB gate in 7/16 — so an SNR test flipped the verdict to "audible,
-  // not muted" in half the runs. Same reason the original comb probe failed: any
-  // energy measurement on a short capture is dominated by its own estimator noise,
-  // whereas a CRC/RS-valid decode is unambiguous. It is also computed
-  // UNCONDITIONALLY, not inside an `if (!us.ok)` branch, so a device that passes
-  // one band can still be told its volume is down.
-  const probed = aud ? [us, aud] : [us];
-  // If the mic never produced usable audio, we know nothing about the speaker —
-  // don't blame the volume. micDead takes precedence over quiet.
-  const micDead = probed.every((b) => b.micDead);
-  const quiet = !micDead && probed.every((b) => !b.ok);
-  const peer = probed.some((b) => b.peer);
-
-  // No band round-tripped ⇒ either the mic is dead or nothing usable came out of
-  // the speaker (the peer-collision case returns earlier and never reaches here).
-  const recommend = us.ok ? "ultrasound" : aud?.ok ? "audible" : micDead ? "nomic" : "louder";
-  const report: SelfTest = { sampleRate: c.sampleRate, bands, recommend, quiet, micDead, peer };
-  dbg({ t: "selftest", report });
-  return report;
+  dbg({ t: "selfheard", heard, micDead, samples: buf.length, rms });
+  return { heard, micDead };
 }
 
 // ── Carrier sense ───────────────────────────────────────────────────────────
