@@ -45,6 +45,7 @@ const binFreqs = (B) => { const o: number[] = []; for (let g = 0; g < B.groups; 
 // the other device.
 let txMode = "audible";
 export function setUltrasound(on: boolean) { txMode = on ? "ultrasound" : "audible"; }
+export const txBand = (): string => txMode; // which band the next frame will use
 
 function crc8(bytes) {
   let c = 0;
@@ -457,7 +458,7 @@ export async function withEchoCapture(
     });
     for (let p = 0; p < buf.length; p += 2048) dec.push(buf.slice(p, Math.min(p + 2048, buf.length)));
   }
-  dbg({ t: "selfheard", heard, micDead, samples: buf.length, rms });
+  dbg({ t: "selfheard", band: txMode, heard, micDead, samples: buf.length, rms });
   return { heard, micDead };
 }
 

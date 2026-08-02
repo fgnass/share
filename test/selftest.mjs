@@ -203,5 +203,70 @@ console.log("\n── evidence hierarchy ──");
     ok(provesMic(f), `decoding a ${name} proves the mic works`);
 }
 
+// Band fallback. Ultrasound is inaudible, so staying on it costs the user nothing;
+// audible beacons are loud and unpleasant at close range. So we leave ultrasound
+// ONLY on positive evidence that this device can't hear its own US but CAN hear
+// lower frequencies — never as a reaction to one unlucky echo.
+//
+// The regression this locks down: band selection used to alternate unconditionally
+// (i % 2), so half of every device's beacons were audible even when ultrasound
+// worked perfectly. Measured on real hardware: ~50% audible before, 0% after.
+console.log("\n── band fallback ──");
+{
+  // Mirrors pairing.ts's pickTxBand / ultrasoundHopeless.
+  const mk = () => ({ ultrasound: { heard: 0, missed: 0 }, audible: { heard: 0, missed: 0 } });
+  const sim = (echo, { sentAny = true, speakerProven = false, micDead = false } = {}) => {
+    const heardOn = (b) => echo[b].heard > 0;
+    const hopeless = () => !heardOn("ultrasound") && echo.ultrasound.missed >= 3 && heardOn("audible");
+    const volLow = () => sentAny && !speakerProven && !micDead && !heardOn("ultrasound") && !heardOn("audible");
+    return (i) => {
+      if (hopeless()) return "audible";
+      const need = !heardOn("audible") && !heardOn("ultrasound");
+      return !(need && i % 4 === 3) ? "ultrasound" : "audible";
+    };
+  };
+
+  // Ultrasound works → never emit an audible beacon, ever.
+  {
+    const e = mk(); e.ultrasound.heard = 1;
+    const d = sim(e);
+    const bands = [0,1,2,3,4,5,6,7].map(d);
+    ok(bands.every(b => b === "ultrasound"), "US self-heard ⇒ 0 audible beacons across 8 rounds");
+  }
+
+  // US marginal (misses) but never confirmed audible → STAY on ultrasound. This is
+  // the case that used to bail out immediately.
+  {
+    const e = mk(); e.ultrasound.missed = 5;
+    const d = sim(e);
+    const aud = [0,1,2,3,4,5,6,7].map(d).filter(b => b === "audible").length;
+    ok(aud <= 2, `US misses alone don't force audible (${aud}/8 sampled for evidence)`);
+    ok(aud >= 1, "  …but audible IS sampled, so the comparison can be made");
+  }
+
+  // US misses AND audible confirmed on the same hardware → switch, and stay switched.
+  {
+    const e = mk(); e.ultrasound.missed = 3; e.audible.heard = 1;
+    const d = sim(e);
+    ok([0,1,2,3,4].map(d).every(b => b === "audible"), "US misses + audible works ⇒ settle on audible");
+  }
+
+  // Two misses is not enough — one unlucky echo pair must not condemn the band.
+  {
+    const e = mk(); e.ultrasound.missed = 2; e.audible.heard = 1;
+    const d = sim(e);
+    ok(d(0) === "ultrasound", "2 US misses is below the threshold ⇒ still ultrasound");
+  }
+
+  // A peer's GOT/ANSWER proves the speaker, which retires the volume hint even if
+  // self-echo never worked — so it must not drag us to audible either.
+  {
+    const e = mk(); e.ultrasound.missed = 9;
+    const d = sim(e, { speakerProven: true });
+    ok(d(0) === "ultrasound" && d(1) === "ultrasound",
+      "speaker proven end-to-end ⇒ stay on ultrasound despite echo misses");
+  }
+}
+
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");
 process.exit(failed ? 1 : 0);

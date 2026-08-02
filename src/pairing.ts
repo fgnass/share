@@ -5,7 +5,7 @@ import {
 } from "./webrtc";
 import {
   playFrame, listenFor, stopAudio, setUltrasound, resetAuto, abortAuto,
-  isOffer, isAnswer, isAck, isGot, ACK, GOT, rxBand, withEchoCapture, rxInFrame, rxEtaMs,
+  isOffer, isAnswer, isAck, isGot, ACK, GOT, rxBand, txBand, withEchoCapture, rxInFrame, rxEtaMs,
 } from "./music";
 import * as S from "./state";
 import { method as methodS } from "./state";
@@ -617,12 +617,28 @@ let autoRunning = false, bandMatched = false, ackTick = 0;
 // only the muted device shows the hint. A single flag can't express that.
 let micOk = false;         // latched: any decode
 let speakerProven = false; // latched: a peer's GOT/ANSWER — causal, end-to-end
-let echoHeard = false;     // last transmission came back to our own mic (proxy)
 let micDead = false;       // capture had no usable audio → not a volume problem
 let sentAny = false;       // have we transmitted at all yet? (before that, unknown)
-// Show the volume hint only when we've actually sent something and have no evidence
-// at all that it left the device.
-const volumeLow = () => sentAny && !speakerProven && !echoHeard && !micDead;
+
+// Self-echo tallies, PER BAND. Kept separately because "I couldn't hear my own
+// ultrasound" and "nothing comes out of this speaker" are completely different
+// conclusions, and conflating them is what made devices bail out of ultrasound.
+// Ultrasound self-echo is inherently marginal — a transducer that rolls off above
+// 15 kHz still passes data peer-to-peer while failing to hear ITSELF — so a single
+// miss must not condemn the band.
+const echo: Record<string, { heard: number; missed: number }> =
+  { ultrasound: { heard: 0, missed: 0 }, audible: { heard: 0, missed: 0 } };
+const heardOn = (b: string) => echo[b].heard > 0;
+// Give up on ultrasound only with positive evidence that the problem is specific to
+// ultrasound: several US misses AND a confirmed audible round-trip on the same
+// hardware. Without the audible confirmation a US miss is more likely a quiet
+// speaker (or an unlucky echo) than a band incapability.
+const US_MISSES_BEFORE_FALLBACK = 3;
+const ultrasoundHopeless = () =>
+  !heardOn("ultrasound") && echo.ultrasound.missed >= US_MISSES_BEFORE_FALLBACK && heardOn("audible");
+// Nothing at all has come back on any band → the speaker itself is the problem.
+const volumeLow = () =>
+  sentAny && !speakerProven && !micDead && !heardOn("ultrasound") && !heardOn("audible");
 
 const setAudioStatus = (t: string) => (S.audioStatus.value = t);
 const setProgress = (f: number | null) => (S.audioProgress.value = f);
@@ -652,13 +668,33 @@ function matchBand() {
   micOk = true; micDead = false;
   if (S.bandMode.value === "auto") { setUltrasound(rxBand() === "ultrasound"); bandMatched = true; }
 }
-// Which band to beacon in. We alternate until a received frame locks the band
-// (matchBand), since each beacon now self-tests whichever band it used — there's no
-// separate probe to consult. While the volume hint is showing, force audible:
-// ultrasound is both the least likely band to work on such a device AND inaudible,
-// so the user would be told to turn the volume up while hearing nothing at all.
+// Which band to beacon in. Ultrasound is the default and we STAY there: it is
+// inaudible, so a wrong guess costs the user nothing, whereas audible beacons are
+// loud and genuinely unpleasant at close range. We leave it only on positive
+// evidence that this device can't hear its own ultrasound but CAN hear lower
+// frequencies (ultrasoundHopeless) — a device-specific verdict, not a reaction to
+// one unlucky echo.
+//
+// The earlier version alternated bands every round and forced audible whenever the
+// last frame wasn't self-heard. Both were wrong: ultrasound self-echo is marginal
+// on real hardware (measured 2/5 on a MacBook Air) even when peer-to-peer
+// ultrasound works fine, so devices bailed to audible almost immediately and then
+// blasted each other at full volume without connecting.
+//
+// While we're still gathering evidence we drop into audible only occasionally (every
+// 4th beacon), which is enough to learn "audible round-trips on this hardware"
+// without turning discovery into a siren. Once a received frame locks the band
+// (matchBand) this stops mattering.
 function pickTxBand(i: number) {
-  if (S.bandMode.value === "auto" && !bandMatched) setUltrasound(volumeLow() ? false : i % 2 === 0);
+  if (S.bandMode.value !== "auto" || bandMatched) return;
+  if (ultrasoundHopeless()) { setUltrasound(false); return; }   // settled: audible from here on
+  // Otherwise stay on ultrasound, but sample audible every 4th round while we still
+  // lack the comparison ultrasoundHopeless() needs. Sampling — not switching: even
+  // when nothing has been heard at all, at most 1 beacon in 4 is audible. Making
+  // that case go fully audible (an earlier version did) turns a run of unlucky
+  // ultrasound echoes into a continuous siren, which is exactly the complaint.
+  const needAudibleEvidence = !heardOn("audible") && !heardOn("ultrasound");
+  setUltrasound(!(needAudibleEvidence && i % 4 === 3));
 }
 const heardStr = (f: Uint8Array | null) => f ? (isAck(f) ? `ACK ${ctlNonce(f)}` : isGot(f) ? `GOT ${ctlNonce(f)}` : isOffer(f) ? "OFFER" : isAnswer(f) ? "ANSWER" : `0x${f[0].toString(16)}`) : "nothing";
 
@@ -677,10 +713,10 @@ async function hear(ms: number, onProgress?: (f: number) => void): Promise<Uint8
     micOk = true; micDead = false;
     const own = (isAck(f) || isGot(f)) ? ctlNonce(f) === myNonce : codeOf(f) === myCode;
     if (!own) return f;
-    // Our own frame came back through the room: the speaker works too. (sendHeard's
-    // shadow decoder is the primary path for this, but a long transmission can also
+    // Our own frame came back through the room: the speaker works on that band too.
+    // (sendHeard's shadow decoder is the primary path; a long transmission can also
     // land here if the echo finishes decoding after playFrame's reset.)
-    echoHeard = true;
+    const b = rxBand(); if (b && echo[b]) echo[b].heard++;
     slog("own echo ignored", heardStr(f));
   }
 }
@@ -699,22 +735,25 @@ function proveSpeaker(why: string) {
 // also a check that our speaker works, so there is no separate probe phase.
 async function sendHeard(payload: Uint8Array, onprogress?: (f: number) => void) {
   sentAny = true;
+  const band = txBand();
   const { heard, micDead: dead } = await withEchoCapture(payload, () => playFrame(payload, { onprogress }));
-  echoHeard = heard;
+  // Tally per band: the fallback decision is comparative (see ultrasoundHopeless).
+  if (heard) echo[band].heard++; else echo[band].missed++;
   // A decode of our own echo is still a decode: it proves the mic works too. And
   // once micOk has ever latched, a dead-looking capture can't be a mic problem —
   // we demonstrably heard something before, so don't send the user chasing
   // permissions. Report it as "not heard" (a speaker/volume question) instead.
   if (heard) micOk = true;
   micDead = heard ? false : dead && !micOk;
-  slog("self-heard", { heard, micDead, rawMicDead: dead, micOk });
+  slog("self-heard", { band, heard, micDead, rawMicDead: dead, echo });
 }
 
 export async function soundAuto() {
   if (autoRunning) return;
   autoRunning = true; resetAuto(); soundBusyUI(true);
   bandMatched = false; ackTick = 0;
-  micOk = false; speakerProven = false; echoHeard = false; micDead = false; sentAny = false;
+  micOk = false; speakerProven = false; micDead = false; sentAny = false;
+  for (const b of Object.keys(echo)) echo[b] = { heard: 0, missed: 0 };
   slog("soundAuto start", { role, myNonce, band: S.bandMode.value, loopback: S.loopbackMode });
   // No probe phase: we go straight to discovery, and the first beacon doubles as the
   // capability test. If a peer answers it we never pay for a self-check at all.
