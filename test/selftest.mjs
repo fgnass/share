@@ -335,66 +335,89 @@ console.log("\n── volume hint ──");
 // "stuck retrying"; the rail exists to show the process advanced. It must therefore
 // never march backwards, even though the handshake genuinely loops (unacknowledged
 // offers get resent, a missed answer drops back to listening).
-console.log("\n── step rail (derived from state) ──");
+console.log("\n── state machine ──");
 {
-  // Mirrors pairing.ts's derivedStep(): the step is a PURE FUNCTION of protocol facts,
-  // so the rail cannot drift out of agreement with the protocol. That drift is the bug
-  // this replaces: with ~11 scattered setStep() calls, hearing a peer's ACK resolved
-  // roles and exited discovery WITHOUT advancing the rail, so one device sat on step 2
-  // while the other reached step 4.
-  const blank = () => ({
-    micProven: false, peerHeard: false, rolesResolved: false,
-    offerExists: false, replyExists: false, bothDescriptions: false, linked: false,
-  });
-  const step = (s) =>
-    s.linked ? "done"
-    : (s.replyExists || s.bothDescriptions) ? "reply"
-    : (s.offerExists || s.rolesResolved) ? "offer"
-    : (s.micProven || s.peerHeard) ? "find"
-    : "check";
+  // Mirrors pairing.ts exactly.
+  const NEXT = {
+    checking:     ["finding", "negotiating", "linked", "failed"],
+    finding:      ["negotiating", "linked", "failed"],
+    negotiating:  ["offering", "answering", "linked", "failed"],
+    offering:     ["waitingReply", "answering", "linked", "failed"],
+    answering:    ["waitingLink", "offering", "linked", "failed"],
+    waitingReply: ["answering", "offering", "linked", "failed"],
+    waitingLink:  ["offering", "answering", "linked", "failed"],
+    linked:       [],
+    failed:       [],
+  };
+  const RAIL = {
+    checking: "check", finding: "find", negotiating: "find",
+    offering: "offer", answering: "offer",
+    waitingReply: "reply", waitingLink: "reply",
+    linked: "done", failed: "check",
+  };
+  const mk = () => {
+    let st = "checking";
+    return {
+      go: (to) => { if (to !== st && NEXT[st].includes(to)) st = to; return st; },
+      get: () => st,
+      rail: () => RAIL[st],
+    };
+  };
 
-  ok(step(blank()) === "check", "no facts ⇒ Check");
-  ok(step({ ...blank(), micProven: true }) === "find", "own echo heard ⇒ Find");
-  ok(step({ ...blank(), peerHeard: true }) === "find", "peer frame heard ⇒ Find");
-  // THE REPORTED BUG: an ACK resolves roles and exits discovery. The rail must follow.
-  ok(step({ ...blank(), micProven: true, rolesResolved: true }) === "offer",
-    "roles resolved (e.g. via a peer's ACK) ⇒ Offer — the desktop-stuck-on-2 bug");
-  ok(step({ ...blank(), offerExists: true }) === "offer", "an offer exists ⇒ Offer");
-  ok(step({ ...blank(), replyExists: true }) === "reply", "an answer exists ⇒ Reply");
-  ok(step({ ...blank(), linked: true }) === "done", "the datachannel opened ⇒ Done");
-  // THE 5-vs-3 BUG. The answerer holds both descriptions the moment it builds its reply;
-  // the offerer only once that reply arrives and decodes. So "both descriptions" is
-  // inherently asymmetric and must NOT reach Done, or the answerer sits on step 5 while
-  // the offerer is still on 3. Only `linked` — which both devices learn together when the
-  // datachannel opens — is allowed to.
-  ok(step({ ...blank(), bothDescriptions: true }) === "reply",
-    "both descriptions but not linked ⇒ Reply, NOT Done (the 5-vs-3 split)");
+  // Every state has a rail step, and the machine is closed (no transition to a state
+  // that isn't declared).
+  ok(Object.keys(NEXT).every((k) => RAIL[k]), "every state projects to a rail step");
+  ok(Object.values(NEXT).flat().every((t) => t in NEXT), "no transition points at an undeclared state");
+  ok(NEXT.linked.length === 0 && NEXT.failed.length === 0, "linked and failed are terminal");
 
-  // Monotonic for free: facts only ever latch true, so the derived step can only climb.
-  const s = blank();
-  const seen = [];
-  for (const set of ["micProven", "rolesResolved", "offerExists", "replyExists", "linked"]) {
-    s[set] = true; seen.push(step(s));
+  // The happy paths, both roles.
+  const offerer = mk();
+  for (const s of ["finding", "negotiating", "offering", "waitingReply", "linked"]) offerer.go(s);
+  ok(offerer.get() === "linked", "offerer walks checking→finding→negotiating→offering→waitingReply→linked");
+  const answerer = mk();
+  for (const s of ["finding", "negotiating", "answering", "waitingLink", "linked"]) answerer.go(s);
+  ok(answerer.get() === "linked", "answerer walks the mirror path");
+
+  // THE REPORTED BUG (step 1 vs step 3, and 5 vs 3): the two devices hold DIFFERENT
+  // internal states throughout the exchange, but the rail must agree at every stage.
+  const pairs = [
+    [["finding"], ["finding"], "find"],
+    [["finding","negotiating"], ["finding","negotiating"], "find"],
+    [["finding","negotiating","offering"], ["finding","negotiating","answering"], "offer"],
+    [["finding","negotiating","offering","waitingReply"],
+     ["finding","negotiating","answering","waitingLink"], "reply"],
+  ];
+  for (const [aPath, bPath, expect] of pairs) {
+    const a = mk(), b = mk();
+    aPath.forEach(a.go); bPath.forEach(b.go);
+    ok(a.rail() === expect && b.rail() === expect,
+      `offerer(${a.get()}) and answerer(${b.get()}) BOTH show "${expect}"`);
   }
-  ok(JSON.stringify(seen) === JSON.stringify(["find", "offer", "offer", "reply", "done"]),
-    "accumulating facts climb the rail and never rewind");
 
-  // A re-heard offer arriving after the answer cannot rewind, because replyExists stays
-  // latched — no separate guard needed.
-  const late = { ...blank(), replyExists: true };
-  late.offerExists = true;
-  ok(step(late) === "reply", "a re-heard offer after the reply does NOT rewind");
+  // Illegal moves are refused rather than applied — a stray call can't fake progress.
+  const m = mk();
+  ok(m.go("offering") === "checking", "checking→offering is refused (roles aren't settled)");
+  ok(m.go("waitingReply") === "checking", "checking→waitingReply is refused");
+  m.go("finding");
+  ok(m.go("waitingLink") === "finding", "finding→waitingLink is refused");
+  m.go("linked");
+  ok(m.go("checking") === "linked", "nothing escapes a terminal state");
 
-  // Receiving advances the rail too, not just sending. A code frame is seconds of air
-  // time: the sender showed "Offer" while the receiver sat on "Check" for the whole
-  // transfer, looking stuck. Any frame arriving proves the mic — which is what Check
-  // asks — so reception records micProven immediately. Only LONG frames are narrated;
-  // a 3-byte beacon would flash a label gone before it can be read.
-  const recv = (etaMs) => ({ micProven: true, narrated: etaMs > 900 });
-  ok(step({ ...blank(), ...recv(4000) }) === "find", "receiving a frame clears the Check gate");
-  ok(recv(4000).narrated, "a long (code) frame is narrated with progress");
-  ok(!recv(200).narrated, "a 3-byte beacon is NOT narrated (would flash and vanish)");
-  ok(step({ ...blank(), ...recv(200) }) === "find", "  …but a beacon still clears the gate");
+  // Offer/reply wording is unreachable before roles are settled: the only states whose
+  // status mentions them are offering/answering/waiting*, and none is reachable from
+  // checking or finding.
+  const preRoles = ["checking", "finding"];
+  const roleStates = ["offering", "answering", "waitingReply", "waitingLink"];
+  ok(preRoles.every((p) => roleStates.every((r) => !NEXT[p].includes(r))),
+    "no pre-role state can jump straight to an offer/reply state");
+
+  // The volume hint lives in `checking` ONLY, so it cannot appear mid-send — the phone
+  // showing "Turn the volume up" while sending its code was exactly this.
+  const hint = (state, spoke, missed) =>
+    state === "checking" && spoke && missed >= 3;
+  ok(hint("checking", true, 3), "checking + real misses ⇒ hint");
+  for (const st of ["finding", "negotiating", "offering", "answering", "waitingReply", "waitingLink", "linked"])
+    ok(!hint(st, true, 9), `  …unreachable in ${st}`);
 }
 
 // Heard-but-not-locked. The decoder's ONLY way into "data" is a chirp correlation over

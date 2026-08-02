@@ -268,7 +268,7 @@ function enterRoom() {
   slog("✅ CONNECTED — data channel open");
   // The one moment BOTH devices learn the same thing simultaneously, so it is the only
   // honest source for the terminal step. Set before stopAudio() tears the run down.
-  fact((s) => { s.linked = true; });
+  go("linked");
   autoRunning = false; stopCamera(); stopAudio();
   clearGrace(); clearPairWatch(); S.stunPrompt.value = false; setRoom("Connected", true, false);
   S.screen.value = "room";
@@ -439,7 +439,7 @@ async function applyAnswer(sdp: RTCSessionDescriptionInit, code?: string) {
     return;
   }
   applied = true; committed = true;
-  fact((s) => { s.bothDescriptions = true; s.replyExists = true; });
+  go("waitingLink");
   setStatus("Connecting…");
   armPairWatch();
 }
@@ -490,9 +490,9 @@ function onScan(parsed: { type: string; code: string }, manual = false) {
   let dec;
   try { dec = decode(parsed.code); } catch (e) { slog("onScan decode failed", e); return; }
   slog("onScan", { type: parsed.type, peerNonce: dec.nonce, myNonce, role, committed, applied, entered });
-  // A code in hand IS the milestone, whichever side produced it and whichever method
-  // delivered it (sound, QR, link). Nouns, so this reads the same on both devices.
-  fact((s) => { if (parsed.type === "a") s.replyExists = true; else s.offerExists = true; });
+  // Receiving the peer's code settles our role: their offer makes us the answerer,
+  // their answer means our offer landed and we are now waiting for the link.
+  if (parsed.type === "a") go("waitingLink"); else go("answering");
   // STUN propagation: a peer's code carrying a reflexive (srflx) candidate means
   // it turned STUN on. A one-sided srflx rarely connects, so we adopt it too and
   // regenerate our side with STUN — which then carries srflx to them in turn.
@@ -602,156 +602,169 @@ export function retryWithStun() {
 let autoRunning = false, bandMatched = false, ackTick = 0;
 
 // ── Sound pairing state machine ─────────────────────────────────────────────
-// ONE record of facts, ONE derivation of what the user sees. Everything the sound
-// flow learns is recorded in `sound` and the UI is a pure function of it (see
-// render()). This replaces ~11 scattered setStep/setAudioStatus/flag mutations that
-// each patched the UI from wherever they happened to run, which is exactly how the
-// two devices ended up showing different steps for the same protocol state.
+// A real state machine: ONE `st` variable holding ONE of eight states, and a `go()`
+// that only permits declared transitions. The previous version derived a state from ten
+// independent booleans — 1024 combinations of which 8 were legal — and every bug came
+// from an illegal one (roles resolved while nothing was being sent, "both descriptions"
+// true on one side only). Deriving state from a bit-soup is not a state machine.
 //
-// Rules:
-//   * Facts are monotonic where the protocol is monotonic (heard/proven/exchanged
-//     latch true) and momentary where reality is momentary (`activity`).
-//   * NOTHING writes to a signal except render(). Mutate facts, then call render().
-type Activity =
-  | { kind: "idle" }                                  // listening, nothing in the air
-  | { kind: "sending"; what: "beacon" | "offer" | "reply"; frac: number | null }
-  | { kind: "receiving"; what: "code" | "reply"; frac: number }
-  | { kind: "hearing" };                              // tones audible, no chirp lock
+// The machine models the PROTOCOL, which is genuinely asymmetric: one device offers and
+// waits for a reply, the other answers and waits for the link. The RAIL is a separate
+// projection onto steps that are identical on both devices (see RAIL below), so the two
+// can hold different internal states and still show the same step.
+//
+//   checking     no audio proven yet
+//   finding      audio works, peer not heard
+//   negotiating  peer heard, who-offers not settled
+//   offering     I offer; offer not yet acknowledged        ─┐ role fork
+//   answering    I answer; reply not yet sent               ─┘
+//   waitingReply my offer is out, awaiting their reply      ─┐ rejoins
+//   waitingLink  my reply is out, awaiting the datachannel  ─┘
+//   linked       datachannel open                            (terminal)
+//   failed       audio unavailable                           (terminal)
+type St =
+  | "checking" | "finding" | "negotiating"
+  | "offering" | "answering" | "waitingReply" | "waitingLink"
+  | "linked" | "failed";
 
-type Sound = {
-  running: boolean;
-  fatal: string | null;    // audio unavailable on this device — overrides everything
-  // ── audio capability ──
-  micProven: boolean;      // decoded ANYTHING (peer frame or own echo) → the mic works
-  micDead: boolean;        // a capture yielded no usable audio at all
-  spoke: boolean;          // we have transmitted at least once (conclusively)
-  // Self-echo tallies PER BAND. "I can't hear my own ultrasound" and "nothing comes
-  // out of this speaker" are different conclusions; one counter can't express both.
-  echo: Record<string, { heard: number; missed: number }>;
-  // ── protocol ──
-  peerHeard: boolean;      // decoded a frame that was definitely the peer's
-  rolesResolved: boolean;  // peerNonce known → we know who offers
-  offerExists: boolean;    // an offer exists here, sent or received
-  replyExists: boolean;    // an answer exists here, sent or received
-  // Both descriptions exist on THIS device. Necessarily asymmetric: the answerer has
-  // both the moment it builds its reply, while the offerer must wait for that reply to
-  // arrive and decode. So this alone must NOT drive the final step, or the answerer
-  // shows Done while the offerer is still on Offer — exactly the 5-vs-3 split reported.
-  bothDescriptions: boolean;
-  // The datachannel actually opened. Symmetric: both devices learn it at the same
-  // moment, so it is the only honest source for the terminal step.
-  linked: boolean;
-  speakerProven: boolean;  // a peer's GOT/ANSWER — causal proof our sound reached them
-  activity: Activity;
+// Declared transitions. Anything absent is illegal and is refused with a log rather
+// than silently corrupting the display. `failed` and `linked` are reachable from
+// anywhere (audio can die, and the datachannel can open before we notice our own send).
+const NEXT: Record<St, St[]> = {
+  checking:     ["finding", "negotiating", "linked", "failed"],
+  finding:      ["negotiating", "linked", "failed"],
+  negotiating:  ["offering", "answering", "linked", "failed"],
+  offering:     ["waitingReply", "answering", "linked", "failed"],  // role can flip on a tiebreak
+  answering:    ["waitingLink", "offering", "linked", "failed"],
+  waitingReply: ["answering", "offering", "linked", "failed"],      // re-offer / role flip
+  waitingLink:  ["offering", "answering", "linked", "failed"],      // resend if the reply was missed
+  linked:       [],
+  failed:       [],
 };
 
-const blank = (): Sound => ({
-  running: false, fatal: null,
-  micProven: false, micDead: false, spoke: false,
-  echo: { ultrasound: { heard: 0, missed: 0 }, audible: { heard: 0, missed: 0 } },
-  peerHeard: false, rolesResolved: false,
-  offerExists: false, replyExists: false, bothDescriptions: false, linked: false, speakerProven: false,
-  activity: { kind: "idle" },
-});
-let sound: Sound = blank();
+// What the user is doing right now, within a state. Momentary and orthogonal to `st`:
+// a device in `offering` is either mid-transmission or between attempts.
+type Doing =
+  | { t: "idle" }
+  | { t: "tx"; frac: number | null }          // transmitting our own frame
+  | { t: "rx"; frac: number }                 // receiving a frame we locked onto
+  | { t: "hearing" };                         // tones audible, no lock → no length known
 
-const heardOn = (b: string) => sound.echo[b].heard > 0;
-const totalMissed = () => sound.echo.ultrasound.missed + sound.echo.audible.missed;
+let st: St = "checking";
+let doing: Doing = { t: "idle" };
+let running = false;
 
-// Give up on ultrasound only with positive evidence that the problem is specific to
-// ultrasound: several US misses AND a confirmed audible round-trip on the same
-// hardware. Ultrasound self-echo is inherently marginal — a transducer that rolls off
-// above 15 kHz still carries data peer-to-peer while failing to hear ITSELF (~2/5 on
-// real hardware) — so misses alone must not condemn the band.
+// Audio-capability evidence. Deliberately NOT part of `st`: it answers "does this
+// device's audio work", which is orthogonal to protocol progress, and it is only ever
+// *reported* in the `checking` state.
+let micDead = false;
+let spoke = false;                            // we have conclusively transmitted
+const echo: Record<string, { heard: number; missed: number }> =
+  { ultrasound: { heard: 0, missed: 0 }, audible: { heard: 0, missed: 0 } };
+const heardOn = (b: string) => echo[b].heard > 0;
+const totalMissed = () => echo.ultrasound.missed + echo.audible.missed;
+
+// Give up on ultrasound only with positive evidence the problem is ultrasound-specific:
+// several US misses AND a confirmed audible round-trip. US self-echo is marginal (~2/5
+// on real hardware) even when peer-to-peer ultrasound works, so misses alone prove
+// nothing about the band.
 const US_MISSES_BEFORE_FALLBACK = 3;
 const ultrasoundHopeless = () =>
-  !heardOn("ultrasound") && sound.echo.ultrasound.missed >= US_MISSES_BEFORE_FALLBACK
+  !heardOn("ultrasound") && echo.ultrasound.missed >= US_MISSES_BEFORE_FALLBACK
   && heardOn("audible");
 
-// The volume hint needs NOTHING to have come back, on any band, after several tries:
-//   * heardOn() latches, so one confirmed self-hear suppresses it for the whole run.
-//   * speakerProven does too — the peer heard us, so the volume is fine by definition.
-//   * hysteresis, because beacons fire on ~55% of rounds and US self-echo is ~2/5, so
-//     one or two early misses are routine; a silent speaker misses every single time.
+// The volume hint belongs to ONE state. Not a predicate consulted from anywhere: once we
+// leave `checking` it is unreachable, which is why it can no longer pop up mid-send.
+// Hysteresis because beacons fire on ~55% of rounds and US self-echo is ~2/5, so one or
+// two early misses are routine; a silent speaker misses every single time.
 const MIN_MISSES_BEFORE_HINT = 3;
-// The hint is only ever true while we are STILL TRYING TO BE HEARD AT ALL. Once the
-// handshake is under way the audio path is proven by the protocol itself, so the hint
-// would be plainly false — a phone showed it in between sending its own frames, which
-// is what `beyondCheck` rules out. speakerProven alone was not enough: it needs a peer's
-// GOT/ANSWER, and a device busy sending its offer has working audio without either.
-const beyondCheck = () =>
-  sound.peerHeard || sound.rolesResolved || sound.offerExists || sound.replyExists
-  || sound.bothDescriptions || sound.linked;
 const volumeLow = () =>
-  sound.spoke && !sound.speakerProven && !sound.micDead && !beyondCheck()
+  st === "checking" && spoke && !micDead
   && !heardOn("ultrasound") && !heardOn("audible")
   && totalMissed() >= MIN_MISSES_BEFORE_HINT;
 
-// ── Derivation ──────────────────────────────────────────────────────────────
-// Which rail step the facts imply. Highest reached milestone wins, so this is
-// monotonic for free: the handshake loops (offers get resent, a re-heard offer arrives
-// after the answer) but the derived step can only climb as facts accumulate.
-function derivedStep(): S.SoundStep {
-  if (sound.linked) return "done";
-  if (sound.replyExists || sound.bothDescriptions) return "reply";
-  if (sound.offerExists || sound.rolesResolved) return "offer";
-  if (sound.micProven || sound.peerHeard) return "find";
-  return "check";
-}
+// ── Projection: state → rail ────────────────────────────────────────────────
+// The rail deliberately collapses the role fork so BOTH devices show the same step:
+// offering and answering are both "the offer/reply exchange has begun", and both waits
+// are "my half is out". Only `linked`, which both devices learn together, reaches Done.
+const RAIL: Record<St, S.SoundStep> = {
+  checking: "check",
+  finding: "find",
+  negotiating: "find",
+  offering: "offer",
+  answering: "offer",
+  waitingReply: "reply",
+  waitingLink: "reply",
+  linked: "done",
+  failed: "check",
+};
 
-// What to say. One place, so the message can never contradict the step.
-function derivedStatus(): string {
-  if (sound.fatal) return sound.fatal;
-  const a = sound.activity;
-  if (a.kind === "sending") {
-    return a.what === "offer" ? "Sending your code…"
-      : a.what === "reply" ? "Sending your reply…"
-      : "Saying hello…";
+// ── Projection: state → status line ─────────────────────────────────────────
+// `doing` wins when something is actually in the air, because that is the most specific
+// truth. Offer/reply wording only exists in states that are reachable only AFTER roles
+// are settled, so it can never leak into discovery.
+function say(): string {
+  if (st === "failed") return "Audio/mic unavailable on this device.";
+  if (doing.t === "hearing") return "Hearing the other device…";
+  if (doing.t === "tx") {
+    return st === "offering" ? "Sending offer…"
+      : st === "answering" ? "Sending reply…"
+      : "Saying hello…";                      // a beacon, pre-roles
   }
-  if (a.kind === "receiving") return a.what === "reply" ? "Receiving their reply…" : "Receiving their code…";
-  if (a.kind === "hearing") return "Hearing the other device…";
-  // Protocol progress first: once the handshake is under way it is the most specific
-  // truth, and an audio complaint would contradict it. volumeLow() already guards on
-  // beyondCheck(), so this ordering is belt-and-braces rather than load-bearing.
-  if (sound.bothDescriptions) return "Connecting…";
-  if (sound.replyExists) return "Waiting for the link…";
-  if (sound.rolesResolved) return "Working out who sends…";
-  // Only now, with no protocol progress to report, do audio problems get the line.
-  if (sound.micDead) return "Can't hear the mic — check microphone access for this site.";
-  if (volumeLow()) return "Turn the volume up — this device can't hear itself.";
-  return "Looking for the other device…";
+  if (doing.t === "rx") {
+    // What's arriving is the counterpart of what we sent.
+    return st === "waitingReply" ? "Receiving reply…"
+      : st === "waitingLink" ? "Receiving offer…"
+      : "Receiving code…";
+  }
+  switch (st) {
+    case "checking":
+      return micDead ? "Can't hear the mic — check microphone access for this site."
+        : volumeLow() ? "Turn the volume up — this device can't hear itself."
+        : "Checking speaker & mic…";
+    case "finding": return "Looking for the other device…";
+    case "negotiating": return "Working out who sends…";
+    case "offering": return "Ready to send offer…";
+    case "answering": return "Ready to send reply…";
+    case "waitingReply": return "Waiting for their reply…";
+    case "waitingLink": return "Connecting…";
+    case "linked": return "Connected";
+  }
 }
 
 // The ONLY writer of sound-flow UI signals.
 function render() {
-  if (!sound.running) return;
-  const a = sound.activity;
-  S.audioStep.value = derivedStep();
-  S.audioStatus.value = derivedStatus();
-  S.audioTrouble.value = derivedStep() === "check" && (sound.micDead || volumeLow());
-  // A percentage only when we actually know one: the sender knows its own position, a
-  // receiver knows only after it has locked and read the frame length. "hearing" means
-  // tones with no lock, so there is no length and no honest number — barber pole.
-  S.audioIndeterminate.value = a.kind === "hearing";
-  S.audioProgress.value =
-    a.kind === "sending" ? a.frac
-    : a.kind === "receiving" ? a.frac
-    : null;
+  if (!running) return;
+  S.audioStep.value = RAIL[st];
+  S.audioStatus.value = say();
+  S.audioTrouble.value = st === "checking" && (micDead || volumeLow());
+  S.audioIndeterminate.value = doing.t === "hearing";
+  S.audioProgress.value = doing.t === "tx" ? doing.frac : doing.t === "rx" ? doing.frac : null;
 }
 
-// Record a fact, then re-render. Every mutation goes through here so no code path can
-// update state without updating the view.
-function fact(patch: (s: Sound) => void) { patch(sound); render(); }
-const activity = (a: Activity) => fact((s) => { s.activity = a; });
+// Attempt a transition. Illegal moves are refused, not applied — so a stray call can no
+// longer put the display into a state the protocol never reached.
+function go(to: St) {
+  if (to === st) return;
+  if (!NEXT[st].includes(to)) { slog(`illegal transition ${st} → ${to} (ignored)`); return; }
+  slog(`state ${st} → ${to}`);
+  st = to;
+  doing = { t: "idle" };      // a new state starts quiet; callers set `doing` as they act
+  render();
+}
+const setDoing = (d: Doing) => { doing = d; render(); };
+// Record capability evidence (never a state change) and re-render.
+const evidence = (patch: () => void) => { patch(); render(); };
 
 function soundBusyUI(on: boolean) {
   S.audioBusy.value = on;
   if (on) return;
-  // A run that got all the way to dialling SUCCEEDED — leave the rail resting on Done
-  // rather than snapping back to Check, which would read as "it gave up". Any other
-  // ending (cancel, teardown before the exchange) resets to the idle control.
-  const succeeded = sound.bothDescriptions || sound.linked;
-  sound = blank();
+  // A run that reached `linked` SUCCEEDED — leave the rail on Done rather than snapping
+  // back to Check, which reads as "it gave up". Any other ending resets to the control.
+  const succeeded = st === "linked";
+  st = "checking"; doing = { t: "idle" }; running = false;
+  micDead = false; spoke = false;
+  for (const b of Object.keys(echo)) echo[b] = { heard: 0, missed: 0 };
   S.audioProgress.value = null;
   S.audioTrouble.value = false;
   S.audioIndeterminate.value = false;
@@ -780,7 +793,9 @@ const peerNonceOf = (code: string): number | null => { try { return decode(code)
 const alive = () => autoRunning && !entered;
 // Decoding anything at all proves the mic works, and pins the band we heard it on.
 function matchBand() {
-  fact((s) => { s.micProven = true; s.micDead = false; s.peerHeard = true; });
+  micDead = false;
+  if (st === "checking") go("finding");
+  if (st === "finding") go("negotiating");
   if (S.bandMode.value === "auto") { setUltrasound(rxBand() === "ultrasound"); bandMatched = true; }
 }
 // Which band to beacon in. Ultrasound is the default and we STAY there: it is
@@ -828,13 +843,14 @@ async function hear(ms: number, onProgress?: (f: number) => void): Promise<Uint8
     // doesn't matter, because mic health is a property of the receiver alone. Latch
     // it here, the one place every decode passes through. That also clears the Check
     // step: we demonstrably have working audio.
-    fact((s) => { s.micProven = true; s.micDead = false; });
+    micDead = false;
+    if (st === "checking") go("finding");
     const own = (isAck(f) || isGot(f)) ? ctlNonce(f) === myNonce : codeOf(f) === myCode;
-    if (!own) { fact((s) => { s.peerHeard = true; }); return f; }
+    if (!own) { if (st === "finding") go("negotiating"); return f; }
     // Our own frame came back through the room: the speaker works on that band too.
     // (sendHeard's shadow decoder is the primary path; a long transmission can also
     // land here if the echo finishes decoding after playFrame's reset.)
-    const b = rxBand(); fact((s) => { if (b && s.echo[b]) s.echo[b].heard++; });
+    const b = rxBand(); evidence(() => { if (b && echo[b]) echo[b].heard++; });
     slog("own echo ignored", heardStr(f));
   }
 }
@@ -842,11 +858,7 @@ async function hear(ms: number, onProgress?: (f: number) => void): Promise<Uint8
 // Latch end-to-end proof that our sound reached the peer. Only GOT/ANSWER qualify;
 // once set it is never cleared, and it retires the volume hint even if self-echo
 // failed (e.g. a marginal band that round-trips only sometimes).
-function proveSpeaker(why: string) {
-  if (sound.speakerProven) return;
-  fact((s) => { s.speakerProven = true; });
-  slog(`speaker proven end-to-end by peer's ${why}`);
-}
+
 
 // Progress callback for a listen: report a frame WHILE it arrives, not only once it
 // decodes. A code frame is several seconds of air time, so without this the receiving
@@ -861,10 +873,13 @@ function proveSpeaker(why: string) {
 // A frame is arriving. Any decode proves the mic, so that fact is recorded regardless;
 // only a LONG frame is narrated, because a 3-byte beacon completes almost instantly and
 // would flash a message gone before it can be read.
-const receiving = (what: "code" | "reply") => (frac: number) => fact((s) => {
-  s.micProven = true; s.micDead = false;
-  if (rxEtaMs() > 900) s.activity = { kind: "receiving", what, frac };
-});
+// A frame is arriving. Any decode proves the mic, so leave `checking` immediately; only
+// a LONG frame is narrated, because a 3-byte beacon finishes before a label can be read.
+const receiving = () => (frac: number) => {
+  micDead = false;
+  if (st === "checking") go("finding");
+  if (rxEtaMs() > 900) setDoing({ t: "rx", frac }); else render();
+};
 
 // Wait out a frame we can HEAR but couldn't decode. Missing the 80 ms sync chirp (we
 // were transmitting, or it arrived inside the peer's own reverb tail) leaves the
@@ -877,13 +892,15 @@ async function waitOutCarrier(): Promise<boolean> {
   const band = rxCarrier();
   if (!band || rxInFrame()) return false;    // nothing there, or already locked (hear() handles it)
   slog("carrier without lock — holding TX", { band });
-  fact((s) => { s.micProven = true; s.micDead = false; s.activity = { kind: "hearing" }; });
+  micDead = false;
+  if (st === "checking") go("finding");
+  setDoing({ t: "hearing" });
   // Bounded: a stuck "carrier" (a fan, a tone in the room) must not deadlock us.
   const until = performance.now() + 6000;
   while (alive() && performance.now() < until && rxCarrier() && !rxInFrame()) {
     await sleep(120);
   }
-  activity({ kind: "idle" });
+  setDoing({ t: "idle" });
   // If it turned into a real frame, let the caller listen for it properly.
   return alive() && rxInFrame();
 }
@@ -901,26 +918,29 @@ async function sendHeard(payload: Uint8Array, onprogress?: (f: number) => void) 
   // phone with perfectly good audio drift into "Turn the volume up" after a while:
   // each phantom miss accumulated even though the real checks had passed.
   if (inconclusive) { slog("self-heard inconclusive — not counted", { band }); return; }
-  fact((s) => {
-    s.spoke = true;
+  evidence(() => {
+    spoke = true;
     // Tally per band: the fallback decision is comparative (see ultrasoundHopeless).
-    if (heard) s.echo[band].heard++; else s.echo[band].missed++;
-    if (heard) s.micProven = true;
-    s.micDead = heard ? false : dead && !s.micProven;
+    if (heard) echo[band].heard++; else echo[band].missed++;
+    micDead = heard ? false : dead && !heardOn(band) && !heardOn("ultrasound") && !heardOn("audible");
   });
+  // Hearing our own frame proves the audio path, so the check is done.
+  if (heard && st === "checking") go("finding");
   // A decode of our own echo is still a decode: it proves the mic works too. And
   // once micOk has ever latched, a dead-looking capture can't be a mic problem —
   // we demonstrably heard something before, so don't send the user chasing
   // permissions. Report it as "not heard" (a speaker/volume question) instead.
-  slog("self-heard", { band, heard, micDead: sound.micDead, rawMicDead: dead, echo: sound.echo });
+  slog("self-heard", { band, heard, micDead, rawMicDead: dead, echo });
 }
 
 export async function soundAuto() {
   if (autoRunning) return;
   autoRunning = true; resetAuto(); soundBusyUI(true);
   bandMatched = false; ackTick = 0;
-  sound = blank();
-  fact((s) => { s.running = true; });
+  st = "checking"; doing = { t: "idle" };
+  micDead = false; spoke = false;
+  for (const b of Object.keys(echo)) echo[b] = { heard: 0, missed: 0 };
+  running = true; render();
   slog("soundAuto start", { role, myNonce, band: S.bandMode.value, loopback: S.loopbackMode });
   // No probe phase: we go straight to discovery, and the first beacon doubles as the
   // capability test. If a peer answers it we never pay for a self-check at all.
@@ -938,9 +958,11 @@ export async function soundAuto() {
     // than self-echo, which only proves speaker→own-mic. An OFFER or ACK proves
     // nothing about our TX: both are sent unprompted (and an ACK during our offer
     // means the peer was transmitting and CANNOT have heard us).
-    if (isAnswer(f)) { matchBand(); proveSpeaker("answer"); onScan({ type: "a", code: codeOf(f) }); return "answer"; }
+    if (isAnswer(f)) { matchBand(); onScan({ type: "a", code: codeOf(f) }); return "answer"; }
     if (isOffer(f)) { matchBand(); if (peerNonce === null) peerNonce = peerNonceOf(codeOf(f)); onScan({ type: "o", code: codeOf(f) }); return "offer"; }
-    if (isGot(f)) { matchBand(); proveSpeaker("got"); fact((s) => { s.offerExists = true; }); if (peerNonce === null) peerNonce = ctlNonce(f); return "got"; }
+    // GOT proves the peer decoded our offer, so our half is delivered and we are now
+    // simply waiting for their reply.
+    if (isGot(f)) { matchBand(); if (peerNonce === null) peerNonce = ctlNonce(f); go("waitingReply"); return "got"; }
     if (isAck(f)) { matchBand(); if (peerNonce === null) peerNonce = ctlNonce(f); return "ack"; }
     return null;
   };
@@ -950,9 +972,9 @@ export async function soundAuto() {
     // always as fresh as the last frame we sent — no re-probe schedule to maintain,
     // and turning the volume up clears the hint on the very next beacon.
     while (alive() && !committed && peerNonce === null) {
-      activity({ kind: "idle" });   // derived status covers mic/volume trouble
-      const f = await hear(rand(2500, 2500), receiving("code"));
-      activity({ kind: "idle" });
+      setDoing({ t: "idle" });   // status is derived from the state
+      const f = await hear(rand(2500, 2500), receiving());
+      setDoing({ t: "idle" });
       if (!alive()) break;
       slog("discover heard", heardStr(f));
       if (f) route(f);
@@ -967,11 +989,14 @@ export async function soundAuto() {
         if (!alive()) break;
         pickTxBand(ackTick++);
         slog("discover beacon");
+        setDoing({ t: "tx", frac: null });
         await sendHeard(ackFrame());
-        activity({ kind: "idle" });
+        setDoing({ t: "idle" });
       } else slog("discover listen-only round");
     }
-    if (peerNonce !== null) fact((s) => { s.rolesResolved = true; });
+    // Roles are settled: fork on who offers. This is the ONLY way into offering/answering,
+    // which is why offer/reply wording can never appear before negotiation is done.
+    if (peerNonce !== null) go(role === "offerer" && myNonce > peerNonce ? "offering" : "answering");
     if (peerNonce !== null) slog(`role resolved: ${myNonce > peerNonce ? "OFFERER" : "answerer"} (peer ${peerNonce})`);
 
     // ── PHASE 2: DIRECTED EXCHANGE ──
@@ -999,9 +1024,11 @@ export async function soundAuto() {
         if (await waitOutCarrier()) continue;   // audible frame we can't decode → wait our turn
         if (!alive()) break;
         slog("send OFFER");
-        fact((s) => { s.offerExists = true; s.activity = { kind: "sending", what: "offer", frac: 0 }; });
-        await sendHeard(myAudio!, (frac) => activity({ kind: "sending", what: "offer", frac }));
-        activity({ kind: "idle" });
+        go("offering");
+        setDoing({ t: "tx", frac: 0 });
+        await sendHeard(myAudio!, (frac) => setDoing({ t: "tx", frac }));
+        setDoing({ t: "idle" });
+        if (alive()) go("waitingReply");
         if (!alive()) break;
         // One long listen; GOT means the answer (itself several seconds of air
         // time) is under way → extend rather than barge in with a re-offer. An
@@ -1009,8 +1036,8 @@ export async function soundAuto() {
         // have received it → re-offer right away.
         let until = performance.now() + rand(7000, 2000);
         while (alive() && !applied && performance.now() < until) {
-          const f = await hear(until - performance.now(), receiving("reply"));
-          activity({ kind: "idle" });
+          const f = await hear(until - performance.now(), receiving());
+          setDoing({ t: "idle" });
           if (!alive()) break;
           slog("offerer heard", heardStr(f));
           const r = route(f);
@@ -1028,14 +1055,14 @@ export async function soundAuto() {
         slog("send GOT + ANSWER");
         await sendHeard(gotFrame());
         if (!alive()) break;
-        fact((s) => { s.replyExists = true; s.activity = { kind: "sending", what: "reply", frac: 0 }; });
-        await sendHeard(myAudio!, (frac) => activity({ kind: "sending", what: "reply", frac }));
-        activity({ kind: "idle" });
+        go("answering");
+        setDoing({ t: "tx", frac: 0 });
+        await sendHeard(myAudio!, (frac) => setDoing({ t: "tx", frac }));
+        setDoing({ t: "idle" });
         if (!alive()) break;
-        // Our answer is out, so both descriptions exist HERE — but the offerer only has
-        // them once this reply lands, and "WebRTC connecting is the real ack" (below).
-        // So this is not Done yet; only `linked` is.
-        fact((s) => { s.bothDescriptions = true; });
+        // Our reply is out. The offerer only has both halves once it lands, and "WebRTC
+        // connecting is the real ack" — so this is NOT Done; only `linked` is.
+        if (alive()) go("waitingLink");
         // Brief listen; silence or a re-heard offer both mean our answer may have
         // missed → the loop resends. WebRTC connecting is the real ack.
         const f = await hear(rand(3500, 2000));
@@ -1053,11 +1080,13 @@ export async function soundAuto() {
         if (!building && !rxInFrame() && Math.random() < 0.3) {
           pickTxBand(ackTick++);
           slog("answerer beacon");
+          setDoing({ t: "tx", frac: null });
           await sendHeard(ackFrame());
+          setDoing({ t: "idle" });
           if (!alive()) break;
         }
-        const f = await hear(building ? 500 : rand(6000, 3000), receiving("code"));
-        activity({ kind: "idle" });
+        const f = await hear(building ? 500 : rand(6000, 3000), receiving());
+        setDoing({ t: "idle" });
         if (!alive()) break;
         if (f) slog("answerer heard", heardStr(f));
         if (route(f) === "ack" && !rxInFrame()) {
@@ -1071,7 +1100,7 @@ export async function soundAuto() {
         }
       }
     }
-  } catch (e) { slog("error", e); fact((s) => { s.fatal = "Audio/mic unavailable on this device."; }); }
+  } catch (e) { slog("error", e); go("failed"); }
   autoRunning = false; soundBusyUI(false);
 }
 
