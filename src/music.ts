@@ -412,10 +412,12 @@ export type BandTest = {
   rms: number;           // RMS of the whole capture (diagnostic)
   leadRms: number;       // RMS of the pre-TX ambient window (diagnostic)
   samples: number;       // capture length (0 ⇒ the mic delivered nothing)
+  micDead: boolean;      // mic never produced usable audio → NOT a volume problem
 };
 export type SelfTest = {
   sampleRate: number; bands: BandTest[]; recommend: string;
   quiet: boolean;   // no band round-tripped → tell the user to turn it up
+  micDead: boolean; // the mic never delivered usable audio → not a volume problem
   peer: boolean;
 };
 
@@ -450,6 +452,14 @@ async function probeBand(c, mode: string, payload: Uint8Array): Promise<BandTest
 
   const chunks: Float32Array[] = [];
   const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC });
+  // A resolved getUserMedia does NOT mean we have working audio. On iOS Safari the
+  // track can come back already muted (or go muted when another app holds the mic,
+  // or on an incoming call), in which case the capture is digital silence and every
+  // band "fails" — which the caller would otherwise report as "turn the volume up"
+  // on a device whose volume is fine. The tell-tale is the OS recording indicator
+  // never appearing. Record the track state so the caller can tell the two apart.
+  const track = stream.getAudioTracks()[0];
+  const trackMuted = !track || track.muted || !track.enabled || track.readyState !== "live";
   const src = c.createMediaStreamSource(stream);
   const node = c.createScriptProcessor(2048, 1, 1);
   node.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
@@ -500,11 +510,20 @@ async function probeBand(c, mode: string, payload: Uint8Array): Promise<BandTest
   }
   const snr = 10 * Math.log10(peak / floor);
 
+  // Did the MIC work at all? Distinct from "did the speaker work": a real mic
+  // always delivers samples with a non-zero noise floor, so no callbacks at all
+  // (ScriptProcessor starved — common on mobile Safari when the page isn't fully
+  // foreground) or an exactly-silent buffer means we never heard anything, ours or
+  // otherwise. Reporting that as "too quiet" is wrong and unactionable: the user
+  // turns the volume up and nothing changes.
+  const expected = Math.round(0.2 * sr); // ≪ the ~0.55s+ a real capture yields
+  const micDead = trackMuted || buf.length < expected || rms === 0;
+
   // `ok` is the decode and nothing else. snr/rms/leadRms are DIAGNOSTICS ONLY —
   // never gates. On a muted device they swing across ±25 dB run to run (estimator
   // noise on a sub-second capture), so any threshold over them mis-classifies a
   // large fraction of runs; the decode was right 16/16 in the same experiment.
-  const b: BandTest = { name: mode, ok, peer, snr, rms, leadRms, samples: buf.length };
+  const b: BandTest = { name: mode, ok, peer, snr, rms, leadRms, samples: buf.length, micDead };
   dbg({ t: "probe", band: mode, ...b });
   return b;
 }
@@ -514,6 +533,19 @@ async function probeBand(c, mode: string, payload: Uint8Array): Promise<BandTest
 export async function selfTest(only?: string): Promise<SelfTest> {
   const c = audioCtx();
   await c.resume().catch(() => {});
+  // A suspended context emits NOTHING while the mic still captures normally, so
+  // every band would "fail" and we'd tell a perfectly loud phone to turn it up.
+  // Mobile browsers suspend the context unless resume() happens inside a user
+  // gesture, and they re-suspend it when the page backgrounds. Treat it as
+  // inconclusive rather than a volume problem.
+  if (c.state !== "running") {
+    const report: SelfTest = {
+      sampleRate: c.sampleRate, bands: [], recommend: "nocontext",
+      quiet: false, micDead: false, peer: false,
+    };
+    dbg({ t: "selftest", report, ctxState: c.state });
+    return report;
+  }
   const bands: BandTest[] = [];
   const probe = async (mode: string): Promise<BandTest> => {
     const payload = new Uint8Array(SELFTEST_BYTES);
@@ -531,8 +563,9 @@ export async function selfTest(only?: string): Promise<SelfTest> {
   if (only) {
     const b = await probe(only);
     const report: SelfTest = {
-      sampleRate: c.sampleRate, bands, recommend: b.ok ? only : "louder",
-      quiet: !b.ok, peer: b.peer,
+      sampleRate: c.sampleRate, bands,
+      recommend: b.ok ? only : b.micDead ? "nomic" : "louder",
+      quiet: !b.ok && !b.micDead, micDead: b.micDead, peer: b.peer,
     };
     dbg({ t: "selftest", report });
     return report;
@@ -554,14 +587,16 @@ export async function selfTest(only?: string): Promise<SelfTest> {
   // UNCONDITIONALLY, not inside an `if (!us.ok)` branch, so a device that passes
   // one band can still be told its volume is down.
   const probed = aud ? [us, aud] : [us];
-  const quiet = probed.every((b) => !b.ok);
+  // If the mic never produced usable audio, we know nothing about the speaker —
+  // don't blame the volume. micDead takes precedence over quiet.
+  const micDead = probed.every((b) => b.micDead);
+  const quiet = !micDead && probed.every((b) => !b.ok);
   const peer = probed.some((b) => b.peer);
 
-  // No band round-tripped ⇒ nothing usable came out of the speaker, so the only
-  // actionable advice is "turn it up" (the mic-denied / peer-collision cases return
-  // earlier and never reach here).
-  const recommend = us.ok ? "ultrasound" : aud?.ok ? "audible" : "louder";
-  const report: SelfTest = { sampleRate: c.sampleRate, bands, recommend, quiet, peer };
+  // No band round-tripped ⇒ either the mic is dead or nothing usable came out of
+  // the speaker (the peer-collision case returns earlier and never reaches here).
+  const recommend = us.ok ? "ultrasound" : aud?.ok ? "audible" : micDead ? "nomic" : "louder";
+  const report: SelfTest = { sampleRate: c.sampleRate, bands, recommend, quiet, micDead, peer };
   dbg({ t: "selftest", report });
   return report;
 }

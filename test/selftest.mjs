@@ -146,6 +146,30 @@ for (const band of ["ultrasound", "audible"]) {
   ok(same(heard, peerPayload), "peer's frame decodes as ITS payload (→ flagged as collision)");
 }
 
+// A dead mic must be distinguishable from a quiet speaker. Both yield "no decode",
+// but only one is fixed by turning the volume up — reporting "turn the volume up"
+// on a phone whose volume is already maxed is unactionable, and the give-away is
+// that the OS recording indicator never lights up.
+console.log("\n── dead mic vs. quiet speaker ──");
+{
+  const micDeadOf = (buf, trackMuted = false) => {
+    let rms = 0; for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
+    rms = Math.sqrt(rms / Math.max(1, buf.length));
+    return trackMuted || buf.length < Math.round(0.2 * SR) || rms === 0;
+  };
+  const wave = encodeWaveform(payload, SR, "audible");
+  // No callbacks at all (ScriptProcessor starved — seen on mobile Safari).
+  ok(micDeadOf(new Float32Array(0)), "empty capture ⇒ micDead");
+  // Samples arrive but are digital silence (track resolved muted, as on iOS).
+  ok(micDeadOf(new Float32Array(Math.round(1.2 * SR))), "all-zero capture ⇒ micDead");
+  // A track flagged muted, even with plausible audio in the buffer.
+  ok(micDeadOf(capture(wave, { gain: 0.8 }), true), "muted track ⇒ micDead");
+  // A real mic in a silent room still has a noise floor → NOT micDead, just quiet.
+  const quietRoom = capture(wave, { gain: 0, noise: 0.0015 });
+  ok(!micDeadOf(quietRoom), "muted speaker but live mic ⇒ NOT micDead (it's quiet)");
+  ok(!verdict(quietRoom, leadSamples, 800, 100, 4).ok, "  …and still fails to decode");
+}
+
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");
 if (knownBad) console.log(`${knownBad} known-unfixed check(s) — see the bypass note in probeBand()`);
 process.exit(failed ? 1 : 0);

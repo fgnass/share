@@ -593,6 +593,11 @@ export function retryWithStun() {
 // own transmissions (hear() drops those echoes), and before sending anything
 // long we check rxInFrame() so we don't talk over a frame that's coming in.
 let autoRunning = false, bandMatched = false, bandGuess = false, volumeLow = false, ackTick = 0;
+// The mic never delivered usable audio (permission denied, or a track that resolved
+// already muted — common on iOS). Distinct from volumeLow: telling the user to turn
+// the volume up when the mic is the problem is unactionable, and the give-away is
+// that the OS recording indicator never appears.
+let micBad = false;
 
 const setAudioStatus = (t: string) => (S.audioStatus.value = t);
 const setProgress = (f: number | null) => (S.audioProgress.value = f);
@@ -617,7 +622,7 @@ const ctlNonce = (f: Uint8Array) => (f[1] << 8) | f[2]; // ACK/GOT payload = [ty
 const codeOf = (f: Uint8Array) => b64u(f.subarray(1));
 const peerNonceOf = (code: string): number | null => { try { return decode(code).nonce; } catch { return null; } };
 const alive = () => autoRunning && !entered;
-function matchBand() { volumeLow = false; if (S.bandMode.value === "auto") { setUltrasound(rxBand() === "ultrasound"); bandMatched = true; } }
+function matchBand() { volumeLow = false; micBad = false; if (S.bandMode.value === "auto") { setUltrasound(rxBand() === "ultrasound"); bandMatched = true; } }
 // In auto mode we alternate bands to probe — UNLESS the self-test already gave a
 // hardware-informed guess (then hold it until we actually receive a frame, which
 // locks the band via matchBand). Once matched, never override.
@@ -678,13 +683,32 @@ async function probeOnce(first: boolean): Promise<boolean> {
       slog("self-test inconclusive (peer still probing) → blind alternation");
       return false;
     }
+    // The audio context never started (mobile browsers suspend it outside a user
+    // gesture). We emitted nothing, so the probe is inconclusive about both the
+    // speaker and the mic — say nothing rather than accuse the volume.
+    if (r.recommend === "nocontext") {
+      slog("self-test skipped: audio context not running");
+      volumeLow = false; micBad = false;
+      return false;
+    }
+    // The mic never produced usable audio, so the probe says nothing about the
+    // speaker. Report that instead of blaming the volume, and don't let a dead-mic
+    // result pick a band.
+    if (r.micDead) {
+      slog("self-test: mic produced no audio → not a volume problem");
+      volumeLow = false; micBad = true;
+      return false;
+    }
+    micBad = false;
     // Only auto mode lets the probe pick the band. With a pinned band, a failed
     // probe yields recommend === "louder", which must NOT be read as "use audible".
     if (!pinned) { setUltrasound(r.recommend === "ultrasound"); bandGuess = true; }
     volumeLow = r.recommend === "louder";
     return true;
   } catch (e) {
-    slog("self-test failed", e); // mic denied etc. → blind band alternation
+    // Permission denied / no device / NotReadableError → we never had a mic at all.
+    slog("self-test failed", e);
+    volumeLow = false; micBad = true;
     return false;
   }
 }
@@ -692,7 +716,7 @@ async function probeOnce(first: boolean): Promise<boolean> {
 export async function soundAuto() {
   if (autoRunning) return;
   autoRunning = true; resetAuto(); soundBusyUI(true);
-  bandMatched = false; bandGuess = false; volumeLow = false; ackTick = 0;
+  bandMatched = false; bandGuess = false; volumeLow = false; micBad = false; ackTick = 0;
   slog("soundAuto start", { role, myNonce, band: S.bandMode.value, loopback: S.loopbackMode });
   if (S.loopbackMode) {
     bandMatched = true; // no bands over the loopback channel
@@ -732,15 +756,17 @@ export async function soundAuto() {
       // the peer — so a user who followed the instruction saw the same message
       // forever while the beacons kept playing. Re-probe every few rounds so
       // raising the volume clears it on its own within ~10s.
-      if (volumeLow && round > 0 && round % 3 === 0) {
+      if ((volumeLow || micBad) && round > 0 && round % 3 === 0) {
         slog("re-probing (volume may have changed)");
         setAudioStatus("Re-checking speaker & mic…");
         await probeOnce(false);
         if (!alive()) break;
-        if (!volumeLow) slog("device can hear itself now");
+        if (!volumeLow && !micBad) slog("device can hear itself now");
       }
       round++;
-      setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself." : "Looking for the other device…");
+      setAudioStatus(micBad ? "Can't hear the mic — check microphone access for this site."
+        : volumeLow ? "Turn the volume up — this device can't hear itself."
+        : "Looking for the other device…");
       const f = await hear(rand(2500, 2500));
       if (!alive()) break;
       slog("discover heard", heardStr(f));

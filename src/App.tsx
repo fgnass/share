@@ -384,12 +384,12 @@ function DebugPanel() {
             <div class="tband">
               <span class={"tname " + (b.ok ? "ok" : "bad")}>
                 {b.name} · {b.ok ? "decoded own frame" : b.peer ? "peer's frame (collision)" : "no decode"} · {b.snr.toFixed(0)}dB
-                {" · rms "}{b.rms?.toExponential(1)} lead {b.leadRms?.toExponential(1)}
-                {!b.samples ? " · NO MIC SAMPLES" : ""}
+                {" · rms "}{b.rms?.toExponential(1)} lead {b.leadRms?.toExponential(1)} n={b.samples}
+                {b.micDead ? " · MIC DEAD" : ""}
               </span>
             </div>
           ))}
-          <span class="trec">→ <b>{st.recommend}</b>{st.quiet ? " (too quiet — turn up volume)" : ""}{st.peer ? " (peer probing)" : ""}</span>
+          <span class="trec">→ <b>{st.recommend}</b>{st.quiet ? " (too quiet — turn up volume)" : ""}{st.micDead ? " (MIC DEAD — no audio captured)" : ""}{st.peer ? " (peer probing)" : ""}</span>
         </div>
       )}
       <div class="dbglog">{log.map((l) => <div>{l}</div>)}</div>
