@@ -35,16 +35,27 @@ export const audioProgress = signal<number | null>(null); // 0..1 or null
 // Which stage of the sound handshake we're in. The progress bar tracks a single
 // frame, so it legitimately restarts several times per pairing — without a coarser
 // indicator that reads as "it keeps retrying" rather than "it moved on".
-//   listen   — beaconing and listening for the other device (also self-checks audio)
-//   exchange — codes are being sent/received (the long frames)
-//   connect  — both codes exchanged, WebRTC is dialling
-export type SoundStep = "listen" | "exchange" | "connect";
+//
+// Deliberately NOUNS: the two devices traverse the exchange in opposite orders (one
+// sends the offer and waits for the reply, the other waits then replies), so a verb
+// would be wrong on one of them. "Offer" is a thing that exists, not an act — true on
+// both sides, one label set, no role-awareness needed.
+//   check — audio confirmed working (we heard our own beacon, or the peer's frame)
+//   offer — the offer exists here, sent or received
+//   reply — the answer exists here, sent or received
+//   done  — both descriptions exchanged; WebRTC takes over from here
+export type SoundStep = "check" | "offer" | "reply" | "done";
 export const STEPS: { key: SoundStep; label: string }[] = [
-  { key: "listen", label: "Listening" },
-  { key: "exchange", label: "Exchanging" },
-  { key: "connect", label: "Connecting" },
+  { key: "check", label: "Check" },
+  { key: "offer", label: "Offer" },
+  { key: "reply", label: "Reply" },
+  { key: "done", label: "Done" },
 ];
-export const audioStep = signal<SoundStep>("listen");
+export const audioStep = signal<SoundStep>("check");
+// True while the Check gate is failing (nothing audible came back, or the mic never
+// delivered audio). Marks the first step as a problem rather than letting the rail
+// look like it simply hasn't got there yet.
+export const audioTrouble = signal(false);
 // ?band=audible|ultrasound presets the band (handy for testing); default auto.
 const bandParam = new URLSearchParams(location.search).get("band") as BandMode | null;
 export const bandMode = signal<BandMode>(bandParam === "audible" || bandParam === "ultrasound" ? bandParam : "auto");

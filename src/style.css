@@ -17,6 +17,9 @@
   --accent: #acff69;
   --accent-ink: #10180a;
   --err: #ff6b6b;
+  /* Amber, deliberately not --err red: a blocked-but-fixable state (turn the volume
+     up, grant mic access) rather than a failure. */
+  --warn: #ffc861;
   --ok: #acff69;
   --shadow: rgba(0, 0, 0, 0.45);
   --pad: clamp(1.1rem, 4vw, 1.6rem);
@@ -321,6 +324,12 @@ textarea:focus { outline: none; border-color: var(--accent); }
 .soundsteps li.done .dot { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .soundsteps li.at { color: var(--accent); }
 .soundsteps li.at .dot { border-color: var(--accent); color: var(--accent); }
+/* Check is a gate: when audio can't be verified the first step turns amber with a "!"
+   so the rail shows a blocked step, not merely an unreached one. */
+.soundsteps li.bad { color: var(--warn); }
+.soundsteps li.bad .dot {
+  border-color: var(--warn); color: var(--warn); background: var(--bg); animation: none;
+}
 /* Gentle pulse on the active step — signals "working" without the restart-anxiety of
    a bar that keeps resetting. */
 .soundsteps li.at .dot { animation: stepPulse 1.6s ease-in-out infinite; }

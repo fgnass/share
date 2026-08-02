@@ -144,17 +144,27 @@ function Camera() {
 // Coarse "where are we" indicator. The bar inside the button tracks ONE frame and
 // so restarts several times per pairing — which reads as "it keeps retrying" unless
 // something shows that the process actually advanced. Steps only ever move forward.
+// Labels are nouns, because the two devices traverse the exchange in opposite orders
+// (one sends the offer and awaits the reply, the other the reverse) — a noun names a
+// thing that exists and is therefore true on both sides.
 function SoundSteps() {
   const cur = S.audioStep.value;
   const at = S.STEPS.findIndex((s) => s.key === cur);
+  // Check is a gate: while audio is unproven the first step stays active and shows
+  // the problem, instead of the rail implying we've moved on.
+  const stuck = S.audioTrouble.value;
   return (
     <ol class="soundsteps" aria-label="Pairing progress">
-      {S.STEPS.map((s, i) => (
-        <li class={i < at ? "done" : i === at ? "at" : ""} aria-current={i === at ? "step" : undefined}>
-          <span class="dot" aria-hidden="true">{i < at ? <Icon name="check" /> : i + 1}</span>
-          {s.label}
-        </li>
-      ))}
+      {S.STEPS.map((s, i) => {
+        const state = i < at ? "done" : i === at ? "at" : "";
+        const bad = stuck && i === 0 && at === 0;
+        return (
+          <li class={state + (bad ? " bad" : "")} aria-current={i === at ? "step" : undefined}>
+            <span class="dot" aria-hidden="true">{bad ? "!" : i < at ? <Icon name="check" /> : i + 1}</span>
+            {s.label}
+          </li>
+        );
+      })}
     </ol>
   );
 }

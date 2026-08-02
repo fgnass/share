@@ -318,22 +318,30 @@ console.log("\n── volume hint ──");
 // offers get resent, a missed answer drops back to listening).
 console.log("\n── step rail ──");
 {
-  const STEPS = ["listen", "exchange", "connect"];
+  const STEPS = ["check", "offer", "reply", "done"];
   const idx = (s) => STEPS.indexOf(s);
   const mk = () => {
-    let cur = "listen";
+    let cur = "check";
     return {
       set: (s) => { if (idx(s) > idx(cur)) cur = s; },
-      reset: () => { cur = "listen"; },
+      reset: () => { cur = "check"; },
       get: () => cur,
     };
   };
+  // Milestone mapping, as onScan() does it: an answer code means Reply, anything else
+  // (an offer) means Offer. Nouns, so the same mapping is correct on BOTH devices —
+  // the offerer reaches "offer" by sending, the answerer by receiving.
+  const milestone = (type) => (type === "a" ? "reply" : "offer");
+  ok(milestone("o") === "offer", "an offer code ⇒ Offer, whoever produced it");
+  ok(milestone("a") === "reply", "an answer code ⇒ Reply, whoever produced it");
+
   const st = mk();
-  st.set("exchange"); ok(st.get() === "exchange", "listen → exchange advances");
-  st.set("listen");   ok(st.get() === "exchange", "exchange → listen is IGNORED (a resend must not rewind)");
-  st.set("connect");  ok(st.get() === "connect", "exchange → connect advances");
-  st.set("exchange"); ok(st.get() === "connect", "connect → exchange is IGNORED");
-  st.reset();         ok(st.get() === "listen", "a new run resets to listen");
+  st.set("offer"); ok(st.get() === "offer", "check → offer advances");
+  st.set("check"); ok(st.get() === "offer", "offer → check is IGNORED (a resend must not rewind)");
+  st.set("reply"); ok(st.get() === "reply", "offer → reply advances");
+  st.set("offer"); ok(st.get() === "reply", "reply → offer is IGNORED (a re-heard offer must not rewind)");
+  st.set("done");  ok(st.get() === "done", "reply → done advances");
+  st.reset();      ok(st.get() === "check", "a new run resets to check");
 }
 
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");

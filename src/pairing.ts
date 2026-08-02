@@ -436,7 +436,7 @@ async function applyAnswer(sdp: RTCSessionDescriptionInit, code?: string) {
     return;
   }
   applied = true; committed = true;
-  setStep("connect");
+  setStep("done");
   setStatus("Connecting…");
   armPairWatch();
 }
@@ -487,6 +487,9 @@ function onScan(parsed: { type: string; code: string }, manual = false) {
   let dec;
   try { dec = decode(parsed.code); } catch (e) { slog("onScan decode failed", e); return; }
   slog("onScan", { type: parsed.type, peerNonce: dec.nonce, myNonce, role, committed, applied, entered });
+  // A code in hand IS the milestone, whichever side produced it and whichever method
+  // delivered it (sound, QR, link). Nouns, so this reads the same on both devices.
+  setStep(parsed.type === "a" ? "reply" : "offer");
   // STUN propagation: a peer's code carrying a reflexive (srflx) candidate means
   // it turned STUN on. A one-sided srflx rarely connects, so we adopt it too and
   // regenerate our side with STUN — which then carries srflx to them in turn.
@@ -657,17 +660,17 @@ const volumeLow = () =>
 
 const setAudioStatus = (t: string) => (S.audioStatus.value = t);
 const setProgress = (f: number | null) => (S.audioProgress.value = f);
-// Steps only ever advance. The handshake genuinely loops — an offer that wasn't
-// acknowledged gets resent, a missed answer sends us back to listening — but showing
-// that as the rail marching backwards is the very "it's stuck retrying" impression
-// the rail exists to dispel. soundAuto() resets it to "listen" when a run starts;
-// within a run it is monotonic.
+// Steps only ever advance. The handshake genuinely loops — an unacknowledged offer
+// gets resent, a re-heard offer arrives after we already have the answer — but showing
+// that as the rail marching backwards is the very "it's stuck retrying" impression the
+// rail exists to dispel. soundAuto() resets it to "check" when a run starts; within a
+// run it is monotonic.
 const stepIdx = (s: S.SoundStep) => S.STEPS.findIndex((x) => x.key === s);
 const setStep = (s: S.SoundStep) => {
   if (stepIdx(s) > stepIdx(S.audioStep.value)) S.audioStep.value = s;
 };
-const resetStep = () => (S.audioStep.value = "listen");
-function soundBusyUI(on: boolean) { S.audioBusy.value = on; if (!on) { setAudioStatus("Pair by sound"); setProgress(null); } }
+const resetStep = () => (S.audioStep.value = "check");
+function soundBusyUI(on: boolean) { S.audioBusy.value = on; if (!on) { setAudioStatus("Pair by sound"); setProgress(null); S.audioTrouble.value = false; } }
 export function stopSoundAuto() { autoRunning = false; abortAuto(); soundBusyUI(false); }
 
 const rand = (min: number, span: number) => min + Math.floor(Math.random() * span);
@@ -736,8 +739,9 @@ async function hear(ms: number, onProgress?: (f: number) => void): Promise<Uint8
     if (!f) return null;
     // Decoding ANYTHING proves the mic works — peer's frame or our own echo, it
     // doesn't matter, because mic health is a property of the receiver alone. Latch
-    // it here, the one place every decode passes through.
-    micOk = true; micDead = false;
+    // it here, the one place every decode passes through. That also clears the Check
+    // step: we demonstrably have working audio.
+    micOk = true; micDead = false; setStep("offer");
     const own = (isAck(f) || isGot(f)) ? ctlNonce(f) === myNonce : codeOf(f) === myCode;
     if (!own) return f;
     // Our own frame came back through the room: the speaker works on that band too.
@@ -776,7 +780,7 @@ async function sendHeard(payload: Uint8Array, onprogress?: (f: number) => void) 
   // once micOk has ever latched, a dead-looking capture can't be a mic problem —
   // we demonstrably heard something before, so don't send the user chasing
   // permissions. Report it as "not heard" (a speaker/volume question) instead.
-  if (heard) micOk = true;
+  if (heard) { micOk = true; setStep("offer"); }   // audio proven → Check is done
   micDead = heard ? false : dead && !micOk;
   slog("self-heard", { band, heard, micDead, rawMicDead: dead, echo });
 }
@@ -786,7 +790,7 @@ export async function soundAuto() {
   autoRunning = true; resetAuto(); soundBusyUI(true);
   bandMatched = false; ackTick = 0;
   micOk = false; speakerProven = false; micDead = false; sentAny = false;
-  resetStep();
+  resetStep(); S.audioTrouble.value = false;
   for (const b of Object.keys(echo)) echo[b] = { heard: 0, missed: 0 };
   slog("soundAuto start", { role, myNonce, band: S.bandMode.value, loopback: S.loopbackMode });
   // No probe phase: we go straight to discovery, and the first beacon doubles as the
@@ -807,7 +811,7 @@ export async function soundAuto() {
     // means the peer was transmitting and CANNOT have heard us).
     if (isAnswer(f)) { matchBand(); proveSpeaker("answer"); onScan({ type: "a", code: codeOf(f) }); return "answer"; }
     if (isOffer(f)) { matchBand(); if (peerNonce === null) peerNonce = peerNonceOf(codeOf(f)); onScan({ type: "o", code: codeOf(f) }); return "offer"; }
-    if (isGot(f)) { matchBand(); proveSpeaker("got"); if (peerNonce === null) peerNonce = ctlNonce(f); return "got"; }
+    if (isGot(f)) { matchBand(); proveSpeaker("got"); setStep("offer"); if (peerNonce === null) peerNonce = ctlNonce(f); return "got"; }
     if (isAck(f)) { matchBand(); if (peerNonce === null) peerNonce = ctlNonce(f); return "ack"; }
     return null;
   };
@@ -817,6 +821,7 @@ export async function soundAuto() {
     // always as fresh as the last frame we sent — no re-probe schedule to maintain,
     // and turning the volume up clears the hint on the very next beacon.
     while (alive() && !committed && peerNonce === null) {
+      S.audioTrouble.value = micDead || volumeLow();
       setAudioStatus(micDead ? "Can't hear the mic — check microphone access for this site."
         : volumeLow() ? "Turn the volume up — this device can't hear itself."
         : "Looking for the other device…");
@@ -838,7 +843,6 @@ export async function soundAuto() {
     }
     if (peerNonce !== null) slog(`role resolved: ${myNonce > peerNonce ? "OFFERER" : "answerer"} (peer ${peerNonce})`);
 
-    setStep("exchange");
     // ── PHASE 2: DIRECTED EXCHANGE ──
     // Offerer = higher nonce and still holding an offer. The lower-nonce device is
     // the answerer, but can only build its answer once it has received the offer.
@@ -862,6 +866,7 @@ export async function soundAuto() {
         await sleep(rand(200, 200));
         if (!alive() || rxInFrame()) continue;
         setAudioStatus("Sending your code…"); setProgress(0);
+        setStep("offer");
         slog("send OFFER");
         await sendHeard(myAudio!, setProgress); setProgress(null);
         if (!alive()) break;
@@ -890,11 +895,12 @@ export async function soundAuto() {
         await sendHeard(gotFrame());
         if (!alive()) break;
         setAudioStatus("Sending your reply…"); setProgress(0);
+        setStep("reply");
         await sendHeard(myAudio!, setProgress); setProgress(null);
         if (!alive()) break;
         // Our answer is out, so both descriptions exist and WebRTC is dialling —
         // any further sound is just a resend in case the answer was missed.
-        setStep("connect");
+        setStep("done");
         // Brief listen; silence or a re-heard offer both mean our answer may have
         // missed → the loop resends. WebRTC connecting is the real ack.
         const f = await hear(rand(3500, 2000));
