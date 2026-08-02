@@ -281,7 +281,28 @@ export function makeDecoder(sr, onComplete, onProgress) {
       : Math.max(0, Math.min(dataStart + sym * symN, buf.length)); // symbols already decoded
     if (cut > 0) { buf = buf.slice(cut); scan = Math.max(0, scan - cut); dataStart -= cut; }
   }
-  return { push, reset, inFrame: () => state === "data", etaMs };
+  // Is a peer transmitting RIGHT NOW, independent of whether we managed to lock onto
+  // its sync chirp? The chirp is 80 ms; miss it (we were talking, or it landed in the
+  // peer's own reverb tail) and `state` never leaves "search", so we hear a
+  // multi-second frame as pure noise: nothing to show the user, and — worse — no
+  // reason not to talk over it, which is what makes both sides resend.
+  //
+  // Data tones are narrow and loud, so one bin per group dominates its neighbours.
+  // Ambient noise spreads across bins evenly and stays under the ratio. Same test
+  // senseBusy() used, but run on the buffer the persistent receiver already has
+  // instead of opening a second mic.
+  const carrier = (): string | null => {
+    if (buf.length < toneN) return null;
+    const p = buf.length - toneN;
+    for (const B of [BANDS.ultrasound, BANDS.audible]) {
+      const g = binFreqs(B).map((f) => goertzel(buf, p, toneN, f, sr));
+      let mx = 0; for (const v of g) if (v > mx) mx = v;
+      const med = g.slice().sort((a, b) => a - b)[g.length >> 1];
+      if (mx > 4 * (med || 1e-12) && mx > 1e-3) return B.name;
+    }
+    return null;
+  };
+  return { push, reset, inFrame: () => state === "data", etaMs, carrier };
 }
 
 // ── Web Audio wrappers ─────────────────────────────────────────────────────
@@ -320,6 +341,10 @@ function stopTx() {
 
 let rxStream = null, rxNode = null, rxSrc = null, rxMute = null, rxDec = null;
 export const rxInFrame = () => !!rxDec && rxDec.inFrame(); // decoder is mid-frame (don't talk over it)
+// A peer's tones are audible right now, whether or not we locked onto the frame. Use
+// this to hold off transmitting (and to tell the user we hear them) in the case where
+// the chirp was missed and rxInFrame() is therefore false.
+export const rxCarrier = (): string | null => (rxDec ? rxDec.carrier() : null);
 export const rxEtaMs = (): number => (rxDec ? rxDec.etaMs() : 0); // ms until that frame should finish
 
 // ── Persistent receive session ──────────────────────────────────────────────

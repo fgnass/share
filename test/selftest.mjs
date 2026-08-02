@@ -318,7 +318,7 @@ console.log("\n── volume hint ──");
 // offers get resent, a missed answer drops back to listening).
 console.log("\n── step rail ──");
 {
-  const STEPS = ["check", "offer", "reply", "done"];
+  const STEPS = ["check", "find", "offer", "reply", "done"];
   const idx = (s) => STEPS.indexOf(s);
   const mk = () => {
     let cur = "check";
@@ -341,23 +341,57 @@ console.log("\n── step rail ──");
   // exactly what Check asks — so reception clears the gate immediately.
   {
     const recv = (etaMs) => {
-      const out = { step: "offer", narrated: false };   // gate always clears
+      const out = { step: "find", narrated: false };    // gate always clears
       if (etaMs > 900) out.narrated = true;             // only long frames get a label
       return out;
     };
-    ok(recv(4000).step === "offer", "receiving a frame clears the Check gate");
+    ok(recv(4000).step === "find", "receiving a frame clears the Check gate");
     ok(recv(4000).narrated, "a long (code) frame is narrated with progress");
     ok(!recv(200).narrated, "a 3-byte beacon is NOT narrated (would flash and vanish)");
-    ok(recv(200).step === "offer", "  …but a beacon still clears the gate");
+    ok(recv(200).step === "find", "  …but a beacon still clears the gate");
   }
 
   const st = mk();
-  st.set("offer"); ok(st.get() === "offer", "check → offer advances");
+  st.set("find");  ok(st.get() === "find", "check → find advances (audio proven, now discovering)");
+  st.set("offer"); ok(st.get() === "offer", "find → offer advances (roles resolved)");
   st.set("check"); ok(st.get() === "offer", "offer → check is IGNORED (a resend must not rewind)");
   st.set("reply"); ok(st.get() === "reply", "offer → reply advances");
   st.set("offer"); ok(st.get() === "reply", "reply → offer is IGNORED (a re-heard offer must not rewind)");
   st.set("done");  ok(st.get() === "done", "reply → done advances");
   st.reset();      ok(st.get() === "check", "a new run resets to check");
+}
+
+// Heard-but-not-locked. The decoder's ONLY way into "data" is a chirp correlation over
+// threshold; miss that 80ms chirp (we were transmitting, or it landed in the peer's
+// reverb tail) and a multi-second frame reads as pure noise — rxInFrame() stays false,
+// so nothing stopped us transmitting straight over it. That collision is what made both
+// devices send everything twice, and left the receiver showing nothing at all.
+console.log("\n── carrier without lock ──");
+{
+  // Mirrors makeDecoder's carrier(): one bin dominating its neighbours means tones are
+  // present, no chirp needed. Ambient noise spreads evenly and stays under the ratio.
+  const carrier = (bins) => {
+    let mx = 0; for (const v of bins) if (v > mx) mx = v;
+    const med = [...bins].sort((a, b) => a - b)[bins.length >> 1];
+    return mx > 4 * (med || 1e-12) && mx > 1e-3;
+  };
+  const flat = Array.from({ length: 48 }, () => 1e-4);          // quiet room
+  const noisy = Array.from({ length: 48 }, () => 2e-3);         // loud but broadband
+  const tone = [...flat]; tone[17] = 5e-2;                      // one loud bin = a data tone
+  const toneInNoise = [...noisy]; toneInNoise[31] = 8e-2;
+  ok(!carrier(flat), "quiet room ⇒ no carrier");
+  ok(!carrier(noisy), "broadband noise ⇒ no carrier (spreads across bins)");
+  ok(carrier(tone), "a dominant bin ⇒ carrier detected without any chirp lock");
+  ok(carrier(toneInNoise), "a tone above a noisy floor ⇒ still detected");
+
+  // The response: hold TX, report it, and hand back to the listener if it locks.
+  const act = (heardCarrier, locked) => {
+    if (!heardCarrier || locked) return "proceed";   // nothing there, or hear() owns it
+    return "hold";                                  // wait our turn instead of colliding
+  };
+  ok(act(true, false) === "hold", "carrier and no lock ⇒ hold TX (this is the double-send fix)");
+  ok(act(true, true) === "proceed", "already locked ⇒ hear() handles it, don't double-handle");
+  ok(act(false, false) === "proceed", "silence ⇒ transmit normally");
 }
 
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");

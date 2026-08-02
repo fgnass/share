@@ -172,11 +172,13 @@ function SoundSteps() {
 function SoundPanel() {
   const busy = S.audioBusy.value;
   const pct = S.audioProgress.value == null ? 0 : Math.round(S.audioProgress.value * 100);
+  // Hearing them but no chirp lock ⇒ no length ⇒ no honest percentage. Sweep instead.
+  const indet = S.audioIndeterminate.value;
   return (
     <div id="soundPanel">
       <p>Hold the two devices close and tap Pair on both. They negotiate who sends and chirp back and forth on their own until they're linked.</p>
       {busy && <SoundSteps />}
-      <div id="soundCtl" class={"soundbtn" + (busy ? " busy" : "")}
+      <div id="soundCtl" class={"soundbtn" + (busy ? " busy" : "") + (indet ? " indet" : "")}
            onClick={() => { if (!busy) P.soundAuto(); }}>
         <span class="soundmsg">{S.audioStatus.value}</span>
         <span class="soundfill" aria-hidden="true" style={`clip-path: inset(0 ${100 - pct}% 0 0)`}>

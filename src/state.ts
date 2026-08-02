@@ -41,12 +41,20 @@ export const audioProgress = signal<number | null>(null); // 0..1 or null
 // would be wrong on one of them. "Offer" is a thing that exists, not an act — true on
 // both sides, one label set, no role-awareness needed.
 //   check — audio confirmed working (we heard our own beacon, or the peer's frame)
+//   find  — the other device has been heard and who-offers is resolved
 //   offer — the offer exists here, sent or received
 //   reply — the answer exists here, sent or received
 //   done  — both descriptions exchanged; WebRTC takes over from here
-export type SoundStep = "check" | "offer" | "reply" | "done";
+//
+// "find" exists because discovery is a real phase the rail used to hide: after the
+// audio check passes, the two devices beacon at each other and compare nonces to settle
+// who sends the offer. That is what "Looking for the other device…" IS — it is neither
+// part of the audio check nor the offer, and leaving it inside "check" meant the first
+// step stayed active while showing a message about something else entirely.
+export type SoundStep = "check" | "find" | "offer" | "reply" | "done";
 export const STEPS: { key: SoundStep; label: string }[] = [
   { key: "check", label: "Check" },
+  { key: "find", label: "Find" },
   { key: "offer", label: "Offer" },
   { key: "reply", label: "Reply" },
   { key: "done", label: "Done" },
@@ -56,6 +64,9 @@ export const audioStep = signal<SoundStep>("check");
 // delivered audio). Marks the first step as a problem rather than letting the rail
 // look like it simply hasn't got there yet.
 export const audioTrouble = signal(false);
+// We can hear the peer but don't know how much of the frame we'll get (no chirp lock,
+// so no length). The bar sweeps instead of claiming a percentage it doesn't have.
+export const audioIndeterminate = signal(false);
 // ?band=audible|ultrasound presets the band (handy for testing); default auto.
 const bandParam = new URLSearchParams(location.search).get("band") as BandMode | null;
 export const bandMode = signal<BandMode>(bandParam === "audible" || bandParam === "ultrasound" ? bandParam : "auto");

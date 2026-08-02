@@ -277,6 +277,37 @@ textarea:focus { outline: none; border-color: var(--accent); }
   background: var(--accent); color: var(--accent-ink);
   clip-path: inset(0 100% 0 0); transition: clip-path 0.12s linear;
 }
+/* Indeterminate: we hear the peer but never locked onto the frame, so there is no
+   length and therefore no honest percentage. A barber pole says "ongoing, rate
+   unknown" — unlike a sweep, it never implies a position.
+   The stripes go on a pseudo-element over the TRACK, not on .soundfill: that fill is
+   a clipped copy carrying its own dark-on-green label, so animating it would drag the
+   text sideways. The fill stays clipped fully away and the base (light-on-dark) label
+   shows through. */
+.soundbtn.indet .soundfill { clip-path: inset(0 100% 0 0); animation: none; }
+.soundbtn.indet::after {
+  content: ""; position: absolute; inset: 0; z-index: 0; border-radius: inherit;
+  /* 45° so the horizontal repeat is exactly stripe-period × √2. No background-size:
+     a repeating gradient already tiles infinitely, and forcing a size that isn't the
+     true period puts a visible seam at every tile edge — at -60deg an 18px stripe pair
+     repeats every 20.78px horizontally, not the 36px it looks like it should.
+     Animating background-position by one full period is seamless by construction. */
+  /* Neutral slate, not the accent: this state is "we hear something, outcome unknown",
+     not progress, so it shouldn't borrow the green that means real advancement. */
+  background: repeating-linear-gradient(
+    45deg,
+    var(--panel-2) 0 9px,
+    var(--panel) 9px 18px
+  );
+  animation: barberPole 0.9s linear infinite;
+}
+/* 18px stripe period at 45° ⇒ 18 × √2 ≈ 25.456px horizontally. */
+@keyframes barberPole {
+  to { background-position: 25.4558px 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .soundbtn.indet::after { animation: none; }
+}
 .soundbtn .soundx { display: none; }
 /* pairing in progress */
 .soundbtn.busy {

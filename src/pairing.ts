@@ -5,7 +5,7 @@ import {
 } from "./webrtc";
 import {
   playFrame, listenFor, stopAudio, setUltrasound, resetAuto, abortAuto,
-  isOffer, isAnswer, isAck, isGot, ACK, GOT, rxBand, txBand, withEchoCapture, rxInFrame, rxEtaMs,
+  isOffer, isAnswer, isAck, isGot, ACK, GOT, rxBand, txBand, withEchoCapture, rxInFrame, rxEtaMs, rxCarrier,
 } from "./music";
 import * as S from "./state";
 import { method as methodS } from "./state";
@@ -741,7 +741,7 @@ async function hear(ms: number, onProgress?: (f: number) => void): Promise<Uint8
     // doesn't matter, because mic health is a property of the receiver alone. Latch
     // it here, the one place every decode passes through. That also clears the Check
     // step: we demonstrably have working audio.
-    micOk = true; micDead = false; setStep("offer");
+    micOk = true; micDead = false; setStep("find");
     const own = (isAck(f) || isGot(f)) ? ctlNonce(f) === myNonce : codeOf(f) === myCode;
     if (!own) return f;
     // Our own frame came back through the room: the speaker works on that band too.
@@ -773,9 +773,35 @@ function proveSpeaker(why: string) {
 // in the frame it locked onto.
 const receiving = (label: string) => (frac: number) => {
   micOk = true; micDead = false; S.audioTrouble.value = false;
-  setStep("offer");
+  setStep("find");
   if (rxEtaMs() > 900) { setAudioStatus(label); setProgress(frac); }
 };
+
+// Wait out a frame we can HEAR but couldn't decode. Missing the 80 ms sync chirp (we
+// were transmitting, or it arrived inside the peer's own reverb tail) leaves the
+// decoder in "search" for the whole multi-second frame — so rxInFrame() is false and
+// nothing stops us talking straight over it. That collision is what made both devices
+// send everything twice. Staying quiet until the carrier clears turns it into an
+// orderly turn instead, and meanwhile we can honestly say we hear them.
+async function waitOutCarrier(): Promise<boolean> {
+  if (S.loopbackMode) return false;
+  const band = rxCarrier();
+  if (!band || rxInFrame()) return false;    // nothing there, or already locked (hear() handles it)
+  micOk = true; micDead = false; S.audioTrouble.value = false;
+  setStep("find");
+  slog("carrier without lock — holding TX", { band });
+  setAudioStatus("Hearing the other device…");
+  setProgress(null);                          // indeterminate: we don't know the frame length
+  S.audioIndeterminate.value = true;
+  // Bounded: a stuck "carrier" (a fan, a tone in the room) must not deadlock us.
+  const until = performance.now() + 6000;
+  while (alive() && performance.now() < until && rxCarrier() && !rxInFrame()) {
+    await sleep(120);
+  }
+  S.audioIndeterminate.value = false;
+  // If it turned into a real frame, let the caller listen for it properly.
+  return alive() && rxInFrame();
+}
 // Same, for the offerer awaiting the answer: what's arriving is the reply, so the rail
 // advances a step further.
 const receivingReply = (frac: number) => {
@@ -802,7 +828,7 @@ async function sendHeard(payload: Uint8Array, onprogress?: (f: number) => void) 
   // once micOk has ever latched, a dead-looking capture can't be a mic problem —
   // we demonstrably heard something before, so don't send the user chasing
   // permissions. Report it as "not heard" (a speaker/volume question) instead.
-  if (heard) { micOk = true; setStep("offer"); }   // audio proven → Check is done
+  if (heard) { micOk = true; setStep("find"); }    // audio proven → Check is done, now finding
   micDead = heard ? false : dead && !micOk;
   slog("self-heard", { band, heard, micDead, rawMicDead: dead, echo });
 }
@@ -859,11 +885,14 @@ export async function soundAuto() {
         // desyncs them within a few rounds.
         await sleep(rand(0, 900));
         if (!alive() || rxInFrame()) continue; // a frame started while we dawdled → listen instead
+        if (await waitOutCarrier()) continue;  // hearing them but not locked → let them finish
+        if (!alive()) break;
         pickTxBand(ackTick++);
         slog("discover beacon");
         await sendHeard(ackFrame());
       } else slog("discover listen-only round");
     }
+    if (peerNonce !== null) setStep("offer");
     if (peerNonce !== null) slog(`role resolved: ${myNonce > peerNonce ? "OFFERER" : "answerer"} (peer ${peerNonce})`);
 
     // ── PHASE 2: DIRECTED EXCHANGE ──
@@ -888,6 +917,8 @@ export async function soundAuto() {
         // doesn't land in it (that's how offers get missed at close range).
         await sleep(rand(200, 200));
         if (!alive() || rxInFrame()) continue;
+        if (await waitOutCarrier()) continue;   // audible frame we can't decode → wait our turn
+        if (!alive()) break;
         setAudioStatus("Sending your code…"); setProgress(0);
         setStep("offer");
         slog("send OFFER");
@@ -914,6 +945,8 @@ export async function soundAuto() {
         if (!alive()) break;
         await sleep(rand(200, 200)); // turn-around guard (see the offer send)
         if (!alive() || rxInFrame()) continue;
+        if (await waitOutCarrier()) continue;   // audible frame we can't decode → wait our turn
+        if (!alive()) break;
         slog("send GOT + ANSWER");
         await sendHeard(gotFrame());
         if (!alive()) break;
