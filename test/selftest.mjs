@@ -278,7 +278,7 @@ console.log("\n── volume hint ──");
   // Mirrors pairing.ts: sendHeard() tallies only conclusive attempts; volumeLow()
   // needs no success on any band AND >= 3 real misses.
   const mk = () => ({ ultrasound: { heard: 0, missed: 0 }, audible: { heard: 0, missed: 0 } });
-  const run = (attempts) => {
+  const run = (attempts, protocol = {}) => {
     const echo = mk();
     let sentAny = false, speakerProven = false;
     for (const a of attempts) {
@@ -289,7 +289,12 @@ console.log("\n── volume hint ──");
     }
     const heardOn = (b) => echo[b].heard > 0;
     const missed = echo.ultrasound.missed + echo.audible.missed;
-    return sentAny && !speakerProven && !heardOn("ultrasound") && !heardOn("audible") && missed >= 3;
+    // Any protocol progress means the audio path is proven by the handshake itself, so
+    // the hint would be plainly false regardless of the echo tallies.
+    const beyondCheck = !!(protocol.peerHeard || protocol.rolesResolved
+      || protocol.offerExists || protocol.replyExists || protocol.linked);
+    return sentAny && !speakerProven && !beyondCheck
+      && !heardOn("ultrasound") && !heardOn("audible") && missed >= 3;
   };
   const us = (o) => ({ band: "ultrasound", ...o });
 
@@ -310,6 +315,20 @@ console.log("\n── volume hint ──");
   // The peer heard us, so the volume is fine by definition even if self-echo never was.
   ok(!run([us({heard:false}), us({heard:false}), us({heard:false, got:true})]),
     "peer's GOT/ANSWER suppresses the hint regardless of self-echo");
+
+  // THE REPORTED BUG: a phone showed "Turn the volume up" in between sending its own
+  // frames — way past the sound check. speakerProven wasn't enough to stop it: that needs
+  // a peer's GOT/ANSWER, and a device busy sending its offer has demonstrably working
+  // audio without either. Any protocol progress must silence the hint.
+  const misses = [us({heard:false}), us({heard:false}), us({heard:false})];
+  ok(run(misses), "three real misses with NO protocol progress ⇒ hint (baseline)");
+  for (const [name, p] of [
+    ["heard the peer", { peerHeard: true }],
+    ["resolved roles", { rolesResolved: true }],
+    ["holds an offer", { offerExists: true }],
+    ["holds a reply", { replyExists: true }],
+    ["linked", { linked: true }],
+  ]) ok(!run(misses, p), `  …but NOT once we have ${name}`);
 }
 
 // Step rail. The per-frame bar restarts several times per pairing, which reads as
@@ -325,11 +344,11 @@ console.log("\n── step rail (derived from state) ──");
   // while the other reached step 4.
   const blank = () => ({
     micProven: false, peerHeard: false, rolesResolved: false,
-    offerExists: false, replyExists: false, dialling: false,
+    offerExists: false, replyExists: false, bothDescriptions: false, linked: false,
   });
   const step = (s) =>
-    s.dialling ? "done"
-    : s.replyExists ? "reply"
+    s.linked ? "done"
+    : (s.replyExists || s.bothDescriptions) ? "reply"
     : (s.offerExists || s.rolesResolved) ? "offer"
     : (s.micProven || s.peerHeard) ? "find"
     : "check";
@@ -342,12 +361,19 @@ console.log("\n── step rail (derived from state) ──");
     "roles resolved (e.g. via a peer's ACK) ⇒ Offer — the desktop-stuck-on-2 bug");
   ok(step({ ...blank(), offerExists: true }) === "offer", "an offer exists ⇒ Offer");
   ok(step({ ...blank(), replyExists: true }) === "reply", "an answer exists ⇒ Reply");
-  ok(step({ ...blank(), dialling: true }) === "done", "both descriptions ⇒ Done");
+  ok(step({ ...blank(), linked: true }) === "done", "the datachannel opened ⇒ Done");
+  // THE 5-vs-3 BUG. The answerer holds both descriptions the moment it builds its reply;
+  // the offerer only once that reply arrives and decodes. So "both descriptions" is
+  // inherently asymmetric and must NOT reach Done, or the answerer sits on step 5 while
+  // the offerer is still on 3. Only `linked` — which both devices learn together when the
+  // datachannel opens — is allowed to.
+  ok(step({ ...blank(), bothDescriptions: true }) === "reply",
+    "both descriptions but not linked ⇒ Reply, NOT Done (the 5-vs-3 split)");
 
   // Monotonic for free: facts only ever latch true, so the derived step can only climb.
   const s = blank();
   const seen = [];
-  for (const set of ["micProven", "rolesResolved", "offerExists", "replyExists", "dialling"]) {
+  for (const set of ["micProven", "rolesResolved", "offerExists", "replyExists", "linked"]) {
     s[set] = true; seen.push(step(s));
   }
   ok(JSON.stringify(seen) === JSON.stringify(["find", "offer", "offer", "reply", "done"]),

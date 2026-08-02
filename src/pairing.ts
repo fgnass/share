@@ -266,6 +266,9 @@ async function finalize(inc: Incoming, batch: Batch | null, closeBatch: () => vo
 function enterRoom() {
   if (entered) return; entered = true;
   slog("✅ CONNECTED — data channel open");
+  // The one moment BOTH devices learn the same thing simultaneously, so it is the only
+  // honest source for the terminal step. Set before stopAudio() tears the run down.
+  fact((s) => { s.linked = true; });
   autoRunning = false; stopCamera(); stopAudio();
   clearGrace(); clearPairWatch(); S.stunPrompt.value = false; setRoom("Connected", true, false);
   S.screen.value = "room";
@@ -436,7 +439,7 @@ async function applyAnswer(sdp: RTCSessionDescriptionInit, code?: string) {
     return;
   }
   applied = true; committed = true;
-  fact((s) => { s.dialling = true; });
+  fact((s) => { s.bothDescriptions = true; s.replyExists = true; });
   setStatus("Connecting…");
   armPairWatch();
 }
@@ -630,7 +633,14 @@ type Sound = {
   rolesResolved: boolean;  // peerNonce known → we know who offers
   offerExists: boolean;    // an offer exists here, sent or received
   replyExists: boolean;    // an answer exists here, sent or received
-  dialling: boolean;       // both descriptions exchanged; WebRTC has taken over
+  // Both descriptions exist on THIS device. Necessarily asymmetric: the answerer has
+  // both the moment it builds its reply, while the offerer must wait for that reply to
+  // arrive and decode. So this alone must NOT drive the final step, or the answerer
+  // shows Done while the offerer is still on Offer — exactly the 5-vs-3 split reported.
+  bothDescriptions: boolean;
+  // The datachannel actually opened. Symmetric: both devices learn it at the same
+  // moment, so it is the only honest source for the terminal step.
+  linked: boolean;
   speakerProven: boolean;  // a peer's GOT/ANSWER — causal proof our sound reached them
   activity: Activity;
 };
@@ -640,7 +650,7 @@ const blank = (): Sound => ({
   micProven: false, micDead: false, spoke: false,
   echo: { ultrasound: { heard: 0, missed: 0 }, audible: { heard: 0, missed: 0 } },
   peerHeard: false, rolesResolved: false,
-  offerExists: false, replyExists: false, dialling: false, speakerProven: false,
+  offerExists: false, replyExists: false, bothDescriptions: false, linked: false, speakerProven: false,
   activity: { kind: "idle" },
 });
 let sound: Sound = blank();
@@ -664,8 +674,16 @@ const ultrasoundHopeless = () =>
 //   * hysteresis, because beacons fire on ~55% of rounds and US self-echo is ~2/5, so
 //     one or two early misses are routine; a silent speaker misses every single time.
 const MIN_MISSES_BEFORE_HINT = 3;
+// The hint is only ever true while we are STILL TRYING TO BE HEARD AT ALL. Once the
+// handshake is under way the audio path is proven by the protocol itself, so the hint
+// would be plainly false — a phone showed it in between sending its own frames, which
+// is what `beyondCheck` rules out. speakerProven alone was not enough: it needs a peer's
+// GOT/ANSWER, and a device busy sending its offer has working audio without either.
+const beyondCheck = () =>
+  sound.peerHeard || sound.rolesResolved || sound.offerExists || sound.replyExists
+  || sound.bothDescriptions || sound.linked;
 const volumeLow = () =>
-  sound.spoke && !sound.speakerProven && !sound.micDead
+  sound.spoke && !sound.speakerProven && !sound.micDead && !beyondCheck()
   && !heardOn("ultrasound") && !heardOn("audible")
   && totalMissed() >= MIN_MISSES_BEFORE_HINT;
 
@@ -674,8 +692,8 @@ const volumeLow = () =>
 // monotonic for free: the handshake loops (offers get resent, a re-heard offer arrives
 // after the answer) but the derived step can only climb as facts accumulate.
 function derivedStep(): S.SoundStep {
-  if (sound.dialling) return "done";
-  if (sound.replyExists) return "reply";
+  if (sound.linked) return "done";
+  if (sound.replyExists || sound.bothDescriptions) return "reply";
   if (sound.offerExists || sound.rolesResolved) return "offer";
   if (sound.micProven || sound.peerHeard) return "find";
   return "check";
@@ -692,11 +710,15 @@ function derivedStatus(): string {
   }
   if (a.kind === "receiving") return a.what === "reply" ? "Receiving their reply…" : "Receiving their code…";
   if (a.kind === "hearing") return "Hearing the other device…";
-  if (sound.micDead) return "Can't hear the mic — check microphone access for this site.";
-  if (volumeLow()) return "Turn the volume up — this device can't hear itself.";
-  if (sound.dialling) return "Connecting…";
+  // Protocol progress first: once the handshake is under way it is the most specific
+  // truth, and an audio complaint would contradict it. volumeLow() already guards on
+  // beyondCheck(), so this ordering is belt-and-braces rather than load-bearing.
+  if (sound.bothDescriptions) return "Connecting…";
   if (sound.replyExists) return "Waiting for the link…";
   if (sound.rolesResolved) return "Working out who sends…";
+  // Only now, with no protocol progress to report, do audio problems get the line.
+  if (sound.micDead) return "Can't hear the mic — check microphone access for this site.";
+  if (volumeLow()) return "Turn the volume up — this device can't hear itself.";
   return "Looking for the other device…";
 }
 
@@ -728,7 +750,7 @@ function soundBusyUI(on: boolean) {
   // A run that got all the way to dialling SUCCEEDED — leave the rail resting on Done
   // rather than snapping back to Check, which would read as "it gave up". Any other
   // ending (cancel, teardown before the exchange) resets to the idle control.
-  const succeeded = sound.dialling;
+  const succeeded = sound.bothDescriptions || sound.linked;
   sound = blank();
   S.audioProgress.value = null;
   S.audioTrouble.value = false;
@@ -1010,9 +1032,10 @@ export async function soundAuto() {
         await sendHeard(myAudio!, (frac) => activity({ kind: "sending", what: "reply", frac }));
         activity({ kind: "idle" });
         if (!alive()) break;
-        // Our answer is out, so both descriptions exist and WebRTC is dialling —
-        // any further sound is just a resend in case the answer was missed.
-        fact((s) => { s.dialling = true; });
+        // Our answer is out, so both descriptions exist HERE — but the offerer only has
+        // them once this reply lands, and "WebRTC connecting is the real ack" (below).
+        // So this is not Done yet; only `linked` is.
+        fact((s) => { s.bothDescriptions = true; });
         // Brief listen; silence or a re-heard offer both mean our answer may have
         // missed → the loop resends. WebRTC connecting is the real ack.
         const f = await hear(rand(3500, 2000));
