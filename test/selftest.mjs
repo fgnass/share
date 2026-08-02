@@ -316,49 +316,59 @@ console.log("\n── volume hint ──");
 // "stuck retrying"; the rail exists to show the process advanced. It must therefore
 // never march backwards, even though the handshake genuinely loops (unacknowledged
 // offers get resent, a missed answer drops back to listening).
-console.log("\n── step rail ──");
+console.log("\n── step rail (derived from state) ──");
 {
-  const STEPS = ["check", "find", "offer", "reply", "done"];
-  const idx = (s) => STEPS.indexOf(s);
-  const mk = () => {
-    let cur = "check";
-    return {
-      set: (s) => { if (idx(s) > idx(cur)) cur = s; },
-      reset: () => { cur = "check"; },
-      get: () => cur,
-    };
-  };
-  // Milestone mapping, as onScan() does it: an answer code means Reply, anything else
-  // (an offer) means Offer. Nouns, so the same mapping is correct on BOTH devices —
-  // the offerer reaches "offer" by sending, the answerer by receiving.
-  const milestone = (type) => (type === "a" ? "reply" : "offer");
-  ok(milestone("o") === "offer", "an offer code ⇒ Offer, whoever produced it");
-  ok(milestone("a") === "reply", "an answer code ⇒ Reply, whoever produced it");
+  // Mirrors pairing.ts's derivedStep(): the step is a PURE FUNCTION of protocol facts,
+  // so the rail cannot drift out of agreement with the protocol. That drift is the bug
+  // this replaces: with ~11 scattered setStep() calls, hearing a peer's ACK resolved
+  // roles and exited discovery WITHOUT advancing the rail, so one device sat on step 2
+  // while the other reached step 4.
+  const blank = () => ({
+    micProven: false, peerHeard: false, rolesResolved: false,
+    offerExists: false, replyExists: false, dialling: false,
+  });
+  const step = (s) =>
+    s.dialling ? "done"
+    : s.replyExists ? "reply"
+    : (s.offerExists || s.rolesResolved) ? "offer"
+    : (s.micProven || s.peerHeard) ? "find"
+    : "check";
 
-  // Receiving must advance the rail too, not just sending. A code frame is seconds of
-  // air time: the sender showed "Offer" while the receiver still sat on "Check" for the
-  // whole transfer, looking stuck. Any frame arriving proves our mic works, which is
-  // exactly what Check asks — so reception clears the gate immediately.
-  {
-    const recv = (etaMs) => {
-      const out = { step: "find", narrated: false };    // gate always clears
-      if (etaMs > 900) out.narrated = true;             // only long frames get a label
-      return out;
-    };
-    ok(recv(4000).step === "find", "receiving a frame clears the Check gate");
-    ok(recv(4000).narrated, "a long (code) frame is narrated with progress");
-    ok(!recv(200).narrated, "a 3-byte beacon is NOT narrated (would flash and vanish)");
-    ok(recv(200).step === "find", "  …but a beacon still clears the gate");
+  ok(step(blank()) === "check", "no facts ⇒ Check");
+  ok(step({ ...blank(), micProven: true }) === "find", "own echo heard ⇒ Find");
+  ok(step({ ...blank(), peerHeard: true }) === "find", "peer frame heard ⇒ Find");
+  // THE REPORTED BUG: an ACK resolves roles and exits discovery. The rail must follow.
+  ok(step({ ...blank(), micProven: true, rolesResolved: true }) === "offer",
+    "roles resolved (e.g. via a peer's ACK) ⇒ Offer — the desktop-stuck-on-2 bug");
+  ok(step({ ...blank(), offerExists: true }) === "offer", "an offer exists ⇒ Offer");
+  ok(step({ ...blank(), replyExists: true }) === "reply", "an answer exists ⇒ Reply");
+  ok(step({ ...blank(), dialling: true }) === "done", "both descriptions ⇒ Done");
+
+  // Monotonic for free: facts only ever latch true, so the derived step can only climb.
+  const s = blank();
+  const seen = [];
+  for (const set of ["micProven", "rolesResolved", "offerExists", "replyExists", "dialling"]) {
+    s[set] = true; seen.push(step(s));
   }
+  ok(JSON.stringify(seen) === JSON.stringify(["find", "offer", "offer", "reply", "done"]),
+    "accumulating facts climb the rail and never rewind");
 
-  const st = mk();
-  st.set("find");  ok(st.get() === "find", "check → find advances (audio proven, now discovering)");
-  st.set("offer"); ok(st.get() === "offer", "find → offer advances (roles resolved)");
-  st.set("check"); ok(st.get() === "offer", "offer → check is IGNORED (a resend must not rewind)");
-  st.set("reply"); ok(st.get() === "reply", "offer → reply advances");
-  st.set("offer"); ok(st.get() === "reply", "reply → offer is IGNORED (a re-heard offer must not rewind)");
-  st.set("done");  ok(st.get() === "done", "reply → done advances");
-  st.reset();      ok(st.get() === "check", "a new run resets to check");
+  // A re-heard offer arriving after the answer cannot rewind, because replyExists stays
+  // latched — no separate guard needed.
+  const late = { ...blank(), replyExists: true };
+  late.offerExists = true;
+  ok(step(late) === "reply", "a re-heard offer after the reply does NOT rewind");
+
+  // Receiving advances the rail too, not just sending. A code frame is seconds of air
+  // time: the sender showed "Offer" while the receiver sat on "Check" for the whole
+  // transfer, looking stuck. Any frame arriving proves the mic — which is what Check
+  // asks — so reception records micProven immediately. Only LONG frames are narrated;
+  // a 3-byte beacon would flash a label gone before it can be read.
+  const recv = (etaMs) => ({ micProven: true, narrated: etaMs > 900 });
+  ok(step({ ...blank(), ...recv(4000) }) === "find", "receiving a frame clears the Check gate");
+  ok(recv(4000).narrated, "a long (code) frame is narrated with progress");
+  ok(!recv(200).narrated, "a 3-byte beacon is NOT narrated (would flash and vanish)");
+  ok(step({ ...blank(), ...recv(200) }) === "find", "  …but a beacon still clears the gate");
 }
 
 // Heard-but-not-locked. The decoder's ONLY way into "data" is a chirp correlation over
