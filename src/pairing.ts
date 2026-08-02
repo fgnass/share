@@ -5,7 +5,7 @@ import {
 } from "./webrtc";
 import {
   playFrame, listenFor, stopAudio, setUltrasound, resetAuto, abortAuto,
-  isOffer, isAnswer, isAck, isGot, ACK, GOT, rxBand, selfTest, rxInFrame, rxEtaMs,
+  isOffer, isAnswer, isAck, isGot, isProbe, ACK, GOT, rxBand, selfTest, rxInFrame, rxEtaMs,
 } from "./music";
 import * as S from "./state";
 import { method as methodS } from "./state";
@@ -621,7 +621,17 @@ function matchBand() { volumeLow = false; if (S.bandMode.value === "auto") { set
 // In auto mode we alternate bands to probe — UNLESS the self-test already gave a
 // hardware-informed guess (then hold it until we actually receive a frame, which
 // locks the band via matchBand). Once matched, never override.
-function pickTxBand(i: number) { if (S.bandMode.value === "auto" && !bandMatched && !bandGuess) setUltrasound(i % 2 === 0); }
+// Which band to beacon in. While we believe we're muted/too quiet, force audible:
+// ultrasound is both the least likely band to work on such a device AND inaudible,
+// so the user would be told "turn the volume up" while hearing nothing at all. An
+// audible beacon makes the sound match the instruction — if they still hear
+// silence, the output really is muted or routed elsewhere.
+function pickTxBand(i: number) {
+  if (S.bandMode.value === "auto" && !bandMatched) {
+    if (volumeLow) setUltrasound(false);
+    else if (!bandGuess) setUltrasound(i % 2 === 0);
+  }
+}
 const heardStr = (f: Uint8Array | null) => f ? (isAck(f) ? `ACK ${ctlNonce(f)}` : isGot(f) ? `GOT ${ctlNonce(f)}` : isOffer(f) ? "OFFER" : isAnswer(f) ? "ANSWER" : `0x${f[0].toString(16)}`) : "nothing";
 
 // Listen via the persistent receiver, discarding echoes of our own frames (the
@@ -633,9 +643,49 @@ async function hear(ms: number, onProgress?: (f: number) => void): Promise<Uint8
     if (left <= 0 || !alive()) return null;
     const f = await listenFor(Math.max(60, left), onProgress);
     if (!f) return null;
+    // Probe frames (ours or a peer's self-test) carry no handshake meaning — drop
+    // them here rather than letting route() puzzle over them.
+    if (isProbe(f)) { slog("probe frame ignored"); continue; }
     const own = (isAck(f) || isGot(f)) ? ctlNonce(f) === myNonce : codeOf(f) === myCode;
     if (!own) return f;
     slog("own echo ignored", heardStr(f));
+  }
+}
+
+// Run the capability probe and apply its verdict to the band choice. Returns
+// true if it produced a usable answer. `first` distinguishes the initial probe
+// (may retry on peer collision) from a cheap re-check during discovery.
+async function probeOnce(first: boolean): Promise<boolean> {
+  // An explicitly chosen band is never up for revision: probe only that band, and
+  // use the result solely for the volume verdict.
+  const pinned = S.bandMode.value !== "auto" ? S.bandMode.value : undefined;
+  try {
+    let r = await selfTest(pinned);
+    // Both devices usually start together, so their self-tests overlap. The probe
+    // authenticates its own payload, so a peer's frame is detected rather than
+    // mistaken for our echo — back off (same desync jitter the discovery loop
+    // uses) and try once more.
+    if (first && r.peer && alive()) {
+      slog("self-test collided with peer probe — retrying");
+      await sleep(rand(300, 1200));
+      if (alive()) r = await selfTest();
+    }
+    slog("self-test", { recommend: r.recommend, peer: r.peer, bands: r.bands });
+    if (!alive()) return false;
+    if (r.peer) {
+      // Colliding: we've learned nothing reliable about our own hardware. Leave
+      // bandGuess false → blind band alternation, as in the mic-denied case.
+      slog("self-test inconclusive (peer still probing) → blind alternation");
+      return false;
+    }
+    // Only auto mode lets the probe pick the band. With a pinned band, a failed
+    // probe yields recommend === "louder", which must NOT be read as "use audible".
+    if (!pinned) { setUltrasound(r.recommend === "ultrasound"); bandGuess = true; }
+    volumeLow = r.recommend === "louder";
+    return true;
+  } catch (e) {
+    slog("self-test failed", e); // mic denied etc. → blind band alternation
+    return false;
   }
 }
 
@@ -647,17 +697,19 @@ export async function soundAuto() {
   if (S.loopbackMode) {
     bandMatched = true; // no bands over the loopback channel
   } else if (S.bandMode.value !== "auto") {
+    // Band is fixed by the user, so there's nothing to choose — but still probe it,
+    // otherwise a muted device in this mode gets no warning at all and just beacons
+    // silently forever. probeOnce() honours the pinned band and only sets volumeLow.
     setUltrasound(S.bandMode.value === "ultrasound"); bandMatched = true;
-  } else {
-    // Capability check first: play tones through our own speaker and see which
-    // band our own mic hears. Pick the highest band that round-trips; if we can't
-    // even hear our own audible, the device is muted / too quiet — tell the user.
     setAudioStatus("Checking speaker & mic…");
-    try {
-      const r = await selfTest();
-      slog("self-test", { recommend: r.recommend });
-      if (alive()) { setUltrasound(r.recommend === "ultrasound"); bandGuess = true; volumeLow = r.recommend === "louder"; }
-    } catch (e) { slog("self-test failed", e); /* mic denied etc. → blind band alternation */ }
+    await probeOnce(true);
+  } else {
+    // Capability check first: send a real frame through our own speaker and see
+    // which band our own mic decodes back. Pick the highest band that round-trips;
+    // if we can't even hear our own audible, the device is muted / too quiet —
+    // tell the user (and keep re-checking — see the discovery loop below).
+    setAudioStatus("Checking speaker & mic…");
+    await probeOnce(true);
   }
   if (!alive()) { autoRunning = false; soundBusyUI(false); return; }
 
@@ -673,7 +725,21 @@ export async function soundAuto() {
   };
   try {
     // ── PHASE 1: DISCOVERY ── learn the peer's nonce via short beacons only.
+    let round = 0;
     while (alive() && !committed && peerNonce === null) {
+      // "Turn the volume up" has to be a live verdict, not a frozen one: the probe
+      // runs once at startup, and volumeLow is otherwise only cleared by hearing
+      // the peer — so a user who followed the instruction saw the same message
+      // forever while the beacons kept playing. Re-probe every few rounds so
+      // raising the volume clears it on its own within ~10s.
+      if (volumeLow && round > 0 && round % 3 === 0) {
+        slog("re-probing (volume may have changed)");
+        setAudioStatus("Re-checking speaker & mic…");
+        await probeOnce(false);
+        if (!alive()) break;
+        if (!volumeLow) slog("device can hear itself now");
+      }
+      round++;
       setAudioStatus(volumeLow ? "Turn the volume up — this device can't hear itself." : "Looking for the other device…");
       const f = await hear(rand(2500, 2500));
       if (!alive()) break;
@@ -688,7 +754,7 @@ export async function soundAuto() {
         if (!alive() || rxInFrame()) continue; // a frame started while we dawdled → listen instead
         pickTxBand(ackTick++);
         slog("discover beacon");
-        await playFrame(ackFrame(), { intro: false });
+        await playFrame(ackFrame());
       } else slog("discover listen-only round");
     }
     if (peerNonce !== null) slog(`role resolved: ${myNonce > peerNonce ? "OFFERER" : "answerer"} (peer ${peerNonce})`);
@@ -717,7 +783,7 @@ export async function soundAuto() {
         if (!alive() || rxInFrame()) continue;
         setAudioStatus("Sending your code…"); setProgress(0);
         slog("send OFFER");
-        await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
+        await playFrame(myAudio!, { onprogress: setProgress }); setProgress(null);
         if (!alive()) break;
         setAudioStatus("Waiting for their reply…");
         // One long listen; GOT means the answer (itself several seconds of air
@@ -741,10 +807,10 @@ export async function soundAuto() {
         await sleep(rand(200, 200)); // turn-around guard (see the offer send)
         if (!alive() || rxInFrame()) continue;
         slog("send GOT + ANSWER");
-        await playFrame(gotFrame(), { intro: false });
+        await playFrame(gotFrame());
         if (!alive()) break;
         setAudioStatus("Sending your reply…"); setProgress(0);
-        await playFrame(myAudio!, { intro: false, onprogress: setProgress }); setProgress(null);
+        await playFrame(myAudio!, { onprogress: setProgress }); setProgress(null);
         if (!alive()) break;
         // Brief listen; silence or a re-heard offer both mean our answer may have
         // missed → the loop resends. WebRTC connecting is the real ack.
@@ -764,7 +830,7 @@ export async function soundAuto() {
         if (!building && !rxInFrame() && Math.random() < 0.3) {
           pickTxBand(ackTick++);
           slog("answerer beacon");
-          await playFrame(ackFrame(), { intro: false });
+          await playFrame(ackFrame());
           if (!alive()) break;
         }
         const f = await hear(building ? 500 : rand(6000, 3000), setProgress);
@@ -778,7 +844,7 @@ export async function soundAuto() {
           if (!alive() || rxInFrame()) continue;
           pickTxBand(ackTick++);
           slog("ack-reply beacon");
-          await playFrame(ackFrame(), { intro: false });
+          await playFrame(ackFrame());
         }
       }
     }

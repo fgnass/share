@@ -17,7 +17,6 @@ import { rsEncode, rsDecode } from "./rs";
 
 const TONE_MS = 36, GAP_MS = 6, CHIRP_MS = 80, SYNC_GAP_MS = 40, DET_MS = 28;
 
-const midiHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
 // Multi-tone MFSK (ggwave-style). Each band splits a frequency range into
 // `groups` blocks of 16 bins spaced `df` Hz apart. Every symbol lights up ONE
 // tone per group simultaneously → `groups` nibbles (groups/2 bytes) per symbol,
@@ -83,10 +82,9 @@ function frameNibbles(payload) {
 }
 const majority3 = (a: number, b: number, c: number) => (a === b || a === c ? a : b === c ? b : a);
 
-// Add one tone into `data` at sample `off`. Options: wave = "sine" (with `harm`
-// 2nd-harmonic amount) or "square" (buzzy 8-bit chiptune, a few odd harmonics);
-// amp; pluck = struck/decaying (music-box / NES-staccato) vs. held envelope.
-function addTone(data, off, freq, n, sr, { harm = 0, amp = 0.32, pluck = false, wave = "sine" } = {}) {
+// Add one tone into `data` at sample `off`. Options: `harm` = 2nd-harmonic
+// amount; amp; pluck = struck/decaying (music-box) vs. held envelope.
+function addTone(data, off, freq, n, sr, { harm = 0, amp = 0.32, pluck = false } = {}) {
   const end = Math.min(off + n, data.length);
   const atk = pluck ? sr * 0.003 : Math.min(n * 0.3, sr * 0.008);
   const rel = Math.min(n * 0.4, sr * 0.016), relP = sr * 0.006, tau = sr * 0.05;
@@ -101,30 +99,8 @@ function addTone(data, off, freq, n, sr, { harm = 0, amp = 0.32, pluck = false, 
       else if (i > n - rel) env = 0.5 - 0.5 * Math.cos(Math.PI * (n - i) / rel);
     }
     const ph = 2 * Math.PI * freq * (i / sr);
-    const s = wave === "square"
-      ? 0.6 * (Math.sin(ph) + Math.sin(3 * ph) / 3 + Math.sin(5 * ph) / 5 + Math.sin(7 * ph) / 7)
-      : Math.sin(ph) + harm * Math.sin(2 * ph);
-    data[idx] += amp * env * s;
+    data[idx] += amp * env * (Math.sin(ph) + harm * Math.sin(2 * ph));
   }
-}
-
-// Opening of the Super Mario Bros. ground theme (E E · E · C E · G ··· g), in
-// chiptune, with its real syncopated rhythm. [midi | null=rest, ms]. Same square
-// voice/register as the data so it blends. Purely cosmetic — the decoder locks
-// onto the chirp preamble after it and ignores these notes.
-const MARIO_RIFF = [
-  [76, 100], [76, 100], [null, 100], [76, 100], [null, 100],
-  [72, 100], [76, 100], [null, 100], [79, 200], [null, 200], [67, 200],
-];
-const riffSamples = (sr) => MARIO_RIFF.reduce((s, [, ms]) => s + Math.round(ms / 1000 * sr), 0);
-function renderRiff(data, off, sr) {
-  let p = off;
-  for (const [m, ms] of MARIO_RIFF) {
-    const n = Math.round(ms / 1000 * sr);
-    if (m != null) addTone(data, p, midiHz(m), n, sr, { pluck: true, wave: "square", amp: 0.26 });
-    p += n;
-  }
-  return p - off;
 }
 
 // Linear frequency-sweep preamble. Replaces the held marker tone: a chirp gives
@@ -145,17 +121,15 @@ function buildChirp(band, sr, amp = 1) {
   return out;
 }
 
-export function encodeWaveform(payload, sr, mode = txMode, withIntro = true) {
+export function encodeWaveform(payload, sr, mode = txMode) {
   const B = BANDS[mode] || BANDS.audible, audible = mode !== "ultrasound";
   const toneN = Math.round(TONE_MS / 1000 * sr), symN = toneN + Math.round(GAP_MS / 1000 * sr);
   const chirpN = Math.round(CHIRP_MS / 1000 * sr), sgN = Math.round(SYNC_GAP_MS / 1000 * sr);
   const nibs = frameNibbles(payload);
   const G = B.groups, nSym = Math.ceil(nibs.length / G);
-  const riffN = (audible && withIntro) ? riffSamples(sr) + Math.round(sr * 0.12) : 0; // riff + a short gap before the chirp
-  const dataStart = riffN + chirpN + sgN;
+  const dataStart = chirpN + sgN;
   const data = new Float32Array(dataStart + nSym * symN + Math.round(sr * 0.05));
-  if (audible) renderRiff(data, 0, sr);                             // cosmetic Mario intro
-  data.set(buildChirp(B, sr, audible ? 0.5 : 0.6), riffN);        // sync preamble (frequency sweep), region is silent
+  data.set(buildChirp(B, sr, audible ? 0.5 : 0.6), 0);            // sync preamble (frequency sweep)
   // Each symbol lights one tone per group simultaneously. Per-tone amplitude is
   // scaled down by the group count so the summed waveform doesn't clip.
   const amp = Math.min(0.85 / G, 0.3);
@@ -163,7 +137,7 @@ export function encodeWaveform(payload, sr, mode = txMode, withIntro = true) {
     for (let g = 0; g < G; g++) {
       const idx = s * G + g;
       const nib = idx < nibs.length ? nibs[idx] : 0; // pad the last symbol
-      addTone(data, dataStart + s * symN, freqOf(B, g, nib), toneN, sr, { pluck: B.pluck, wave: "sine", harm: B.harm, amp });
+      addTone(data, dataStart + s * symN, freqOf(B, g, nib), toneN, sr, { pluck: B.pluck, harm: B.harm, amp });
     }
   return data;
 }
@@ -314,11 +288,11 @@ let ctx = null;
 const audioCtx = () => (ctx ||= new (window.AudioContext || window.webkitAudioContext)());
 
 let txSource = null, txRaf = 0;
-export async function playBytes(payload, { loop = false, onended, onprogress, intro = true } = {}) {
+export async function playBytes(payload, { loop = false, onended, onprogress } = {}) {
   const c = audioCtx();
   await c.resume().catch(() => {});
   stopTx();
-  const data = encodeWaveform(payload, c.sampleRate, txMode, intro);
+  const data = encodeWaveform(payload, c.sampleRate, txMode);
   const buffer = c.createBuffer(1, data.length, c.sampleRate);
   buffer.getChannelData(0).set(data);
   const src = c.createBufferSource();
@@ -403,30 +377,76 @@ function stopRx() {
 export function stopAudio() { stopTx(); stopRx(); }
 
 // ── Capability self-test (loopback) ─────────────────────────────────────────
-// Play a comb of every candidate tone through this device's own speaker while
-// recording its own mic, then measure received SNR per bin. Tells us (a) which
-// band this device can actually hear itself on and (b) whether it's loud enough.
-// It characterises THIS device's hardware — a good proxy for whether it can take
-// part in a band at all: if your own mic can't hear your own 17 kHz, it won't
-// hear the peer's either. Frequencies are fixed, so both ends stay compatible.
+// Transmit a REAL frame in the candidate band and try to decode our own echo.
+// Tells us (a) which band this device can actually hear itself on and (b) whether
+// it's loud enough. It characterises THIS device's hardware — a good proxy for
+// whether it can take part in a band at all: if your own mic can't hear your own
+// 17 kHz, it won't hear the peer's either.
+//
+// Why a frame and not a comb of bare tones (the previous design): a comb only
+// answers "does bin N have power?", which the old code decided by comparing the
+// strongest window ANYWHERE against a floor measured in a silent lead-in. That
+// ratio is biased wide open — max-of-many vs. mean-of-few reads ~+6 dB on pure
+// noise — so a device with its volume at ZERO passed the ultrasound probe as soon
+// as the room was slightly louder after the lead-in than during it, then picked
+// the inaudible band and reported a clean bill of health. Round-tripping a frame
+// removes the whole class of bug: the pass criterion is CRC/RS validity of a
+// payload we chose, so nothing but our own signal can satisfy it.
+//
+// It also solves peer collision. Both devices run this at the same time (you tap
+// Pair on both), on the same fixed frequency grid, so any energy-based test can
+// mistake the PEER's probe for its own echo. Our payload is random, and the codec
+// already authenticates it end-to-end (crc8 + Reed-Solomon), so a decode that
+// isn't byte-identical to what we sent is definitively not ours — we report the
+// collision instead of scoring it as success. Identical logic in both bands:
+// encodeWaveform() takes the band and the decoder auto-detects it from disjoint
+// chirp sweeps, so there are no per-band amplitudes or bin subsets to tune.
 const MIC = { echoCancellation: false, autoGainControl: false, noiseSuppression: false };
 const naptime = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export type BandTest = { name: string; markerSnr: number; noteSnr: number[]; good: number; ok: boolean };
-export type SelfTest = { sampleRate: number; bands: BandTest[]; recommend: string; quiet: boolean };
+export type BandTest = {
+  name: string;
+  ok: boolean;           // decoded our own frame back
+  peer: boolean;         // decoded SOMEONE ELSE's frame → their self-test overlapped ours
+  snr: number;           // in-band energy during TX vs. ambient floor before it, dB
+  rms: number;           // RMS of the whole capture (diagnostic)
+  leadRms: number;       // RMS of the pre-TX ambient window (diagnostic)
+  samples: number;       // capture length (0 ⇒ the mic delivered nothing)
+};
+export type SelfTest = {
+  sampleRate: number; bands: BandTest[]; recommend: string;
+  quiet: boolean;   // no band round-tripped → tell the user to turn it up
+  peer: boolean;
+};
 
-const SNR_OK = 10;
-const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1] ?? 0; };
+// Self-test frames carry their own type byte so the handshake can't mistake one
+// for a control frame. The probe plays its buffer directly (not via playFrame),
+// so the persistent rx decoder hears it too and can surface it as a normal frame;
+// with a distinct first byte it's simply ignored by route(), whereas a fully
+// random payload would occasionally start with 0x6f/0x61/0xac/0x67 and be read as
+// an offer/answer/ACK/GOT. The remaining bytes stay random — that's the identity
+// that tells our own echo from a peer's simultaneous probe.
+export const PROBE = 0x70;
+const SELFTEST_BYTES = 8;
+export const isProbe = (b: Uint8Array | null): boolean => !!b && b[0] === PROBE;
 
-// Play a comb of tones through the speaker while recording our own mic; returns
-// per-tone SNR in dB (strongest window anywhere vs. the noise floor measured in
-// the silent lead-in before playback).
-async function probeTones(c, freqs: number[], amp: number): Promise<number[]> {
-  const sr = c.sampleRate;
-  const toneN = Math.round(0.06 * sr), gapN = Math.round(0.025 * sr), leadN = Math.round(0.25 * sr);
-  const data = new Float32Array(leadN + freqs.length * (toneN + gapN) + Math.round(0.12 * sr));
-  let p = leadN;
-  for (const f of freqs) { addTone(data, p, f, toneN, sr, { amp, harm: f < 10000 ? 0.15 : 0 }); p += toneN + gapN; }
+const bytesEqual = (a: Uint8Array, b: Uint8Array) =>
+  a.length === b.length && a.every((v, i) => v === b[i]);
+
+// Total in-band power over samples[start..start+n), summed across a band's bins.
+// Used only for the muted/too-quiet verdict — never as the pass criterion.
+const bandPower = (buf: Float32Array, start: number, n: number, sr: number, B): number => {
+  if (start < 0 || start + n > buf.length || n <= 0) return 1e-12;
+  let sum = 0;
+  for (const f of binFreqs(B)) sum += goertzel(buf, start, n, f, sr);
+  return Math.max(sum, 1e-12);
+};
+
+// Play one self-test frame in `mode` while capturing our own mic, then decode the
+// capture offline. Returns the decode outcome plus a crude in-band SNR.
+async function probeBand(c, mode: string, payload: Uint8Array): Promise<BandTest> {
+  const sr = c.sampleRate, B = BANDS[mode];
+  const data = encodeWaveform(payload, sr, mode);
 
   const chunks: Float32Array[] = [];
   const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC });
@@ -436,11 +456,17 @@ async function probeTones(c, freqs: number[], amp: number): Promise<number[]> {
   const mute = c.createGain(); mute.gain.value = 0;
   src.connect(node); node.connect(mute); mute.connect(c.destination);
 
+  // Record ambient for a moment BEFORE emitting, so the floor is measured on the
+  // same open stream (mic gain has already settled) rather than in a lead-in that
+  // sits in the middle of getUserMedia's ramp-up.
+  await naptime(300);
+  const floorEnd = chunks.reduce((n, ch) => n + ch.length, 0);
+
   const buffer = c.createBuffer(1, data.length, sr);
   buffer.getChannelData(0).set(data);
   const bsrc = c.createBufferSource(); bsrc.buffer = buffer; bsrc.connect(c.destination);
   await new Promise<void>((res) => { bsrc.onended = () => res(); bsrc.start(); });
-  await naptime(200);
+  await naptime(250); // let the tail (and any reverb) land in the capture
   node.onaudioprocess = null; src.disconnect(); node.disconnect(); mute.disconnect();
   stream.getTracks().forEach((t) => t.stop());
 
@@ -448,47 +474,94 @@ async function probeTones(c, freqs: number[], amp: number): Promise<number[]> {
   const buf = new Float32Array(total);
   { let o = 0; for (const ch of chunks) { buf.set(ch, o); o += ch.length; } }
 
-  const win = toneN, leadWin = Math.min(leadN, buf.length);
-  const floorOf = (f: number) => {
-    let sum = 0, cnt = 0;
-    for (let s = 0; s + win <= leadWin; s += win) { sum += goertzel(buf, s, win, f, sr); cnt++; }
-    return Math.max(cnt ? sum / cnt : 1e-12, 1e-12);
-  };
-  const peakOf = (f: number) => {
-    let best = 0;
-    for (let s = 0; s + win <= buf.length; s += Math.round(win / 2)) {
-      const g = goertzel(buf, s, win, f, sr); if (g > best) best = g;
-    }
-    return best;
-  };
-  return freqs.map((f) => 10 * Math.log10(peakOf(f) / floorOf(f)));
+  // Decode the capture with a throwaway decoder — the real rx session may be
+  // running, and we want this measurement isolated from it.
+  let got: Uint8Array | null = null;
+  const dec = makeDecoder(sr, (bytes) => { if (!got) got = bytes; });
+  for (let p = 0; p < buf.length; p += 2048) dec.push(buf.slice(p, Math.min(p + 2048, buf.length)));
+
+  const ok = !!got && bytesEqual(got, payload);
+  const peer = !!got && !ok;
+
+  // Diagnostics: a muted device must not decode. If it does, the signal reached
+  // the decoder without crossing the room — report the raw levels so we can see
+  // WHERE from (see the "muted but decodes" note on probeBand).
+  let rms = 0; for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / Math.max(1, buf.length));
+  let leadRms = 0; for (let i = 0; i < Math.min(floorEnd, buf.length); i++) leadRms += buf[i] * buf[i];
+  leadRms = Math.sqrt(leadRms / Math.max(1, Math.min(floorEnd, buf.length)));
+
+  // SNR: in-band power while we were transmitting vs. the pre-TX ambient floor.
+  const win = Math.min(Math.round(0.06 * sr), Math.max(1, floorEnd));
+  const floor = bandPower(buf, Math.max(0, floorEnd - win), win, sr, B);
+  let peak = 1e-12;
+  for (let s = floorEnd; s + win <= buf.length; s += win) {
+    const p = bandPower(buf, s, win, sr, B); if (p > peak) peak = p;
+  }
+  const snr = 10 * Math.log10(peak / floor);
+
+  // `ok` is the decode and nothing else. snr/rms/leadRms are DIAGNOSTICS ONLY —
+  // never gates. On a muted device they swing across ±25 dB run to run (estimator
+  // noise on a sub-second capture), so any threshold over them mis-classifies a
+  // large fraction of runs; the decode was right 16/16 in the same experiment.
+  const b: BandTest = { name: mode, ok, peer, snr, rms, leadRms, samples: buf.length };
+  dbg({ t: "probe", band: mode, ...b });
+  return b;
 }
 
-export async function selfTest(): Promise<SelfTest> {
+// `only` restricts the probe to a single band (the user chose it explicitly, so
+// there is no band decision left — we're only checking the speaker is audible).
+export async function selfTest(only?: string): Promise<SelfTest> {
   const c = audioCtx();
   await c.resume().catch(() => {});
-  const P = bandFreqs();
   const bands: BandTest[] = [];
-  const probe = async (name: string, freqs: number[], amp: number): Promise<BandTest> => {
-    const noteSnr = await probeTones(c, freqs, amp);
-    const good = noteSnr.filter((s) => s >= SNR_OK).length;
-    // markerSnr holds the median bin SNR (no separate marker tone anymore).
-    const b: BandTest = { name, markerSnr: median(noteSnr), noteSnr, good, ok: good >= noteSnr.length - 3 };
+  const probe = async (mode: string): Promise<BandTest> => {
+    const payload = new Uint8Array(SELFTEST_BYTES);
+    crypto.getRandomValues(payload);
+    payload[0] = PROBE;
+    const b = await probeBand(c, mode, payload);
     bands.push(b);
     return b;
   };
-  // Ultrasound first: it's inaudible, so on capable hardware the whole self-test
-  // makes no audible sound at all. Only if ultrasound fails do we probe the
-  // audible band — and then sparsely (every 4th bin, the response is smooth) and
-  // gently, instead of the former full-sweep siren.
-  const us = await probe("ultrasound", P.ultrasound.notes, 0.5);
-  let aud: BandTest | null = null, quiet = false;
-  if (!us.ok) {
-    aud = await probe("audible", P.audible.notes.filter((_, i) => i % 4 === 0), 0.22);
-    quiet = !aud.ok && aud.markerSnr < 6;   // can't even hear our own audible → muted / too quiet
+  // `only` pins the probe to one band: the user picked it explicitly, so we're not
+  // choosing a band any more, just checking whether anything comes back out of the
+  // speaker. Never probe the other band in that case — trying ultrasound when the
+  // user asked for audible would emit sound they didn't ask for and could recommend
+  // a band they rejected.
+  if (only) {
+    const b = await probe(only);
+    const report: SelfTest = {
+      sampleRate: c.sampleRate, bands, recommend: b.ok ? only : "louder",
+      quiet: !b.ok, peer: b.peer,
+    };
+    dbg({ t: "selftest", report });
+    return report;
   }
-  const recommend = us.ok ? "ultrasound" : aud!.ok ? "audible" : quiet ? "louder" : "audible";
-  const report: SelfTest = { sampleRate: c.sampleRate, bands, recommend, quiet };
+  // Ultrasound first: it's inaudible, so on capable hardware the whole self-test
+  // makes no audible sound at all. Only if ultrasound fails do we try the audible
+  // band.
+  const us = await probe("ultrasound");
+  let aud: BandTest | null = null;
+  if (!us.ok) aud = await probe("audible");
+
+  // quiet is derived ONLY from whether a frame decoded, never from a level/SNR
+  // threshold. Measured on a muted MacBook Air: across 16 probes `decoded` was
+  // false 16/16 (correct), while the in-band SNR metric ranged −5.9…+24.2 dB and
+  // crossed a 4 dB gate in 7/16 — so an SNR test flipped the verdict to "audible,
+  // not muted" in half the runs. Same reason the original comb probe failed: any
+  // energy measurement on a short capture is dominated by its own estimator noise,
+  // whereas a CRC/RS-valid decode is unambiguous. It is also computed
+  // UNCONDITIONALLY, not inside an `if (!us.ok)` branch, so a device that passes
+  // one band can still be told its volume is down.
+  const probed = aud ? [us, aud] : [us];
+  const quiet = probed.every((b) => !b.ok);
+  const peer = probed.some((b) => b.peer);
+
+  // No band round-tripped ⇒ nothing usable came out of the speaker, so the only
+  // actionable advice is "turn it up" (the mic-denied / peer-collision cases return
+  // earlier and never reach here).
+  const recommend = us.ok ? "ultrasound" : aud?.ok ? "audible" : "louder";
+  const report: SelfTest = { sampleRate: c.sampleRate, bands, recommend, quiet, peer };
   dbg({ t: "selftest", report });
   return report;
 }
@@ -573,7 +646,7 @@ export function stopMonitor() {
 
 // ── Handshake primitives (used by the automatic ack-handshake) ──────────────
 // Frame type = first payload byte. Offer/answer carry the packed SDP after it;
-// the beacon is a 1-byte "I'm ready to receive" (played as the Mario theme).
+// the beacon is a 1-byte "I'm ready to receive".
 export const BEACON = 0xb0;
 // ACK = "I'm here and ready to receive" — a control frame carrying the sender's
 // nonce so a device can tell a peer's ACK from its own echo. A payload (offer/
@@ -632,11 +705,11 @@ function lbListen(timeoutMs: number): Promise<Uint8Array | null> {
 }
 
 // Play a payload once; resolves when it finishes (or immediately if aborted).
-export function playFrame(payload: Uint8Array, { intro = false, onprogress }: { intro?: boolean; onprogress?: (f: number) => void } = {}): Promise<void> {
+export function playFrame(payload: Uint8Array, { onprogress }: { onprogress?: (f: number) => void } = {}): Promise<void> {
   if (loopback) return lbPlay(payload, onprogress);
   return new Promise((resolve) => {
     if (aborted) return resolve();
-    playBytes(payload, { loop: false, intro, onprogress, onended: () => {
+    playBytes(payload, { loop: false, onprogress, onended: () => {
       // We just filled the air with our own signal, so whatever the decoder is
       // mid-way through is (almost certainly) our own echo. Reset it: instantly
       // ready for the peer's reply chirp instead of finishing our own frame.

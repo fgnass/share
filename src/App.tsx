@@ -24,6 +24,7 @@ export function App() {
     Music.setDebugSink((e: any) => {
       if (e.t === "spectrum") { S.dbgSpectrum.value = e; S.dbgState.value = e.state; }
       else if (e.t === "selftest") { S.dbgSelfTest.value = e.report; S.dbgPush(`self-test → ${e.report.recommend}${e.report.quiet ? " (quiet!)" : ""}`); console.log("%c[codec] self-test", "color:#acff69", e.report); }
+      else if (e.t === "probe") { S.dbgPush(`probe ${e.band}: ${e.ok ? "DECODED" : e.peer ? "peer" : "no decode"} snr ${e.snr.toFixed(1)}dB rms ${e.rms.toExponential(1)} lead ${e.leadRms.toExponential(1)} n=${e.samples}`); console.log("%c[codec] probe", "color:#ffd479", e); }
       else if (e.t === "sync") { S.dbgPush(`sync locked · ${e.band}`); console.log("%c[codec] sync locked", "color:#acff69", e.band, "corr", e.corr); }
       else if (e.t === "frame") { const s = e.ok ? "OK ✓" : e.corrected ? "CRC FAIL ✗" : "RS FAIL ✗"; S.dbgPush(`frame ${s} · ${e.band} · ${e.len}B (${e.bytes}B coded)`); console.log("%c[codec] frame " + s, "color:#acff69", { band: e.band, len: e.len, coded: e.bytes, rsDecoded: e.corrected }); }
     });
@@ -381,13 +382,14 @@ function DebugPanel() {
         <div class="dbgtest">
           {st.bands.map((b: any) => (
             <div class="tband">
-              <span class={"tname " + (b.ok ? "ok" : "bad")}>{b.name} · {b.good}/{b.noteSnr.length} · med {b.markerSnr.toFixed(0)}dB</span>
-              <div class="tcells">
-                {b.noteSnr.map((s: number) => <i class={s >= 10 ? "g" : "b"} style={`height:${Math.max(6, Math.min(100, s * 3))}%`} title={s.toFixed(1) + "dB"} />)}
-              </div>
+              <span class={"tname " + (b.ok ? "ok" : "bad")}>
+                {b.name} · {b.ok ? "decoded own frame" : b.peer ? "peer's frame (collision)" : "no decode"} · {b.snr.toFixed(0)}dB
+                {" · rms "}{b.rms?.toExponential(1)} lead {b.leadRms?.toExponential(1)}
+                {!b.samples ? " · NO MIC SAMPLES" : ""}
+              </span>
             </div>
           ))}
-          <span class="trec">→ <b>{st.recommend}</b>{st.quiet ? " (too quiet — turn up volume)" : ""}</span>
+          <span class="trec">→ <b>{st.recommend}</b>{st.quiet ? " (too quiet — turn up volume)" : ""}{st.peer ? " (peer probing)" : ""}</span>
         </div>
       )}
       <div class="dbglog">{log.map((l) => <div>{l}</div>)}</div>
