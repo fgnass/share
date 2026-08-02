@@ -420,10 +420,17 @@ let echoCap: Float32Array[] | null = null;
 export async function withEchoCapture(
   payload: Uint8Array,
   send: () => Promise<void>,
-): Promise<{ heard: boolean; micDead: boolean }> {
+): Promise<{ heard: boolean; micDead: boolean; inconclusive?: boolean }> {
+  // `inconclusive` means we learned NOTHING about the speaker — as opposed to
+  // heard:false, which is real evidence that sound didn't come back. Callers must not
+  // count an inconclusive result as a miss: on mobile the AudioContext suspends
+  // whenever the page loses foreground or the screen dims, and each suspended beacon
+  // would otherwise be a phantom miss that never made a sound. Enough of those and a
+  // phone whose audio is fine gets told to turn the volume up.
   if (loopback) { await send(); return { heard: true, micDead: false }; } // no acoustic path to test
+  if (aborted) { await send(); return { heard: false, micDead: false, inconclusive: true }; } // torn down mid-run
   const c = audioCtx();
-  if (c.state !== "running") { await send(); return { heard: false, micDead: false }; } // suspended ⇒ inconclusive
+  if (c.state !== "running") { await send(); return { heard: false, micDead: false, inconclusive: true }; }
   // The capture rides on the persistent rx session, so it has to be open BEFORE we
   // transmit. In the pairing loop hear() has usually opened it already, but the
   // first beacon can precede any listen — without this the capture is empty and we
@@ -457,6 +464,13 @@ export async function withEchoCapture(
       if (bytes.length === payload.length && bytes.every((v, i) => v === payload[i])) heard = true;
     });
     for (let p = 0; p < buf.length; p += 2048) dec.push(buf.slice(p, Math.min(p + 2048, buf.length)));
+  }
+  // Torn down while we were transmitting (cancel, or a band/session reset): the
+  // capture is truncated or the rx session is already gone, so neither `heard` nor
+  // `micDead` means anything. Inconclusive, not a miss.
+  if (aborted || !rxNode) {
+    dbg({ t: "selfheard", band: txMode, inconclusive: true, reason: "aborted" });
+    return { heard: false, micDead: false, inconclusive: true };
   }
   dbg({ t: "selfheard", band: txMode, heard, micDead, samples: buf.length, rms });
   return { heard, micDead };

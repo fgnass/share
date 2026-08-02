@@ -268,5 +268,73 @@ console.log("\n── band fallback ──");
   }
 }
 
+// The volume hint. Reported from a real phone: it went from "Listening…" to "Turn
+// the volume up" after a while even though its sound check had passed. Cause: a
+// suspended AudioContext (routine on mobile — the page backgrounds, the screen dims)
+// emits no sound, and withEchoCapture reported heard:false for it, which sendHeard
+// counted as a MISS. Enough phantom misses and a device with fine audio gets blamed.
+console.log("\n── volume hint ──");
+{
+  // Mirrors pairing.ts: sendHeard() tallies only conclusive attempts; volumeLow()
+  // needs no success on any band AND >= 3 real misses.
+  const mk = () => ({ ultrasound: { heard: 0, missed: 0 }, audible: { heard: 0, missed: 0 } });
+  const run = (attempts) => {
+    const echo = mk();
+    let sentAny = false, speakerProven = false;
+    for (const a of attempts) {
+      if (a.inconclusive) continue;                 // <- the fix
+      sentAny = true;
+      if (a.heard) echo[a.band].heard++; else echo[a.band].missed++;
+      if (a.got) speakerProven = true;
+    }
+    const heardOn = (b) => echo[b].heard > 0;
+    const missed = echo.ultrasound.missed + echo.audible.missed;
+    return sentAny && !speakerProven && !heardOn("ultrasound") && !heardOn("audible") && missed >= 3;
+  };
+  const us = (o) => ({ band: "ultrasound", ...o });
+
+  // THE REPORTED BUG: suspended context on every beacon, nothing actually emitted.
+  ok(!run([us({inconclusive:true}), us({inconclusive:true}), us({inconclusive:true}), us({inconclusive:true})]),
+    "suspended-context beacons never raise the hint");
+  // Passed once, then the context suspends repeatedly → must stay quiet.
+  ok(!run([us({heard:true}), us({inconclusive:true}), us({inconclusive:true}), us({inconclusive:true})]),
+    "a passed check is not undone by later inconclusive attempts");
+  // A genuinely silent speaker still gets the hint.
+  ok(run([us({heard:false}), us({heard:false}), us({heard:false})]),
+    "three real misses DO raise the hint");
+  // Hysteresis: one or two early misses are routine (US self-echo is ~2/5).
+  ok(!run([us({heard:false}), us({heard:false})]),
+    "two misses is below the threshold — no premature hint");
+  ok(!run([us({heard:false}), us({heard:false}), us({heard:true}), us({heard:false})]),
+    "unlucky start then a success ⇒ no hint");
+  // The peer heard us, so the volume is fine by definition even if self-echo never was.
+  ok(!run([us({heard:false}), us({heard:false}), us({heard:false, got:true})]),
+    "peer's GOT/ANSWER suppresses the hint regardless of self-echo");
+}
+
+// Step rail. The per-frame bar restarts several times per pairing, which reads as
+// "stuck retrying"; the rail exists to show the process advanced. It must therefore
+// never march backwards, even though the handshake genuinely loops (unacknowledged
+// offers get resent, a missed answer drops back to listening).
+console.log("\n── step rail ──");
+{
+  const STEPS = ["listen", "exchange", "connect"];
+  const idx = (s) => STEPS.indexOf(s);
+  const mk = () => {
+    let cur = "listen";
+    return {
+      set: (s) => { if (idx(s) > idx(cur)) cur = s; },
+      reset: () => { cur = "listen"; },
+      get: () => cur,
+    };
+  };
+  const st = mk();
+  st.set("exchange"); ok(st.get() === "exchange", "listen → exchange advances");
+  st.set("listen");   ok(st.get() === "exchange", "exchange → listen is IGNORED (a resend must not rewind)");
+  st.set("connect");  ok(st.get() === "connect", "exchange → connect advances");
+  st.set("exchange"); ok(st.get() === "connect", "connect → exchange is IGNORED");
+  st.reset();         ok(st.get() === "listen", "a new run resets to listen");
+}
+
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");
 process.exit(failed ? 1 : 0);

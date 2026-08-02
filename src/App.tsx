@@ -141,12 +141,31 @@ function Camera() {
   );
 }
 
+// Coarse "where are we" indicator. The bar inside the button tracks ONE frame and
+// so restarts several times per pairing — which reads as "it keeps retrying" unless
+// something shows that the process actually advanced. Steps only ever move forward.
+function SoundSteps() {
+  const cur = S.audioStep.value;
+  const at = S.STEPS.findIndex((s) => s.key === cur);
+  return (
+    <ol class="soundsteps" aria-label="Pairing progress">
+      {S.STEPS.map((s, i) => (
+        <li class={i < at ? "done" : i === at ? "at" : ""} aria-current={i === at ? "step" : undefined}>
+          <span class="dot" aria-hidden="true">{i < at ? <Icon name="check" /> : i + 1}</span>
+          {s.label}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 function SoundPanel() {
   const busy = S.audioBusy.value;
   const pct = S.audioProgress.value == null ? 0 : Math.round(S.audioProgress.value * 100);
   return (
     <div id="soundPanel">
       <p>Hold the two devices close and tap Pair on both. They negotiate who sends and chirp back and forth on their own until they're linked.</p>
+      {busy && <SoundSteps />}
       <div id="soundCtl" class={"soundbtn" + (busy ? " busy" : "")}
            onClick={() => { if (!busy) P.soundAuto(); }}>
         <span class="soundmsg">{S.audioStatus.value}</span>
@@ -165,7 +184,7 @@ function SoundPanel() {
             <option value="ultrasound">Ultrasound (~15.6–18 kHz)</option>
           </select>
         </label>
-        <p class="hint">Auto picks whichever the two devices actually hear. Ultrasound is near-silent but some speakers and mics can't manage it.</p>
+        <p class="hint">Auto picks whichever the two devices actually hear. Ultrasound (~15.6–18 kHz) is inaudible to most adults, but children and teenagers often hear it clearly — pick Audible tones if that's a problem. Some speakers and mics can't manage ultrasound at all.</p>
       </details>
     </div>
   );

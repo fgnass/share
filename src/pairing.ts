@@ -436,6 +436,7 @@ async function applyAnswer(sdp: RTCSessionDescriptionInit, code?: string) {
     return;
   }
   applied = true; committed = true;
+  setStep("connect");
   setStatus("Connecting…");
   armPairWatch();
 }
@@ -636,12 +637,36 @@ const heardOn = (b: string) => echo[b].heard > 0;
 const US_MISSES_BEFORE_FALLBACK = 3;
 const ultrasoundHopeless = () =>
   !heardOn("ultrasound") && echo.ultrasound.missed >= US_MISSES_BEFORE_FALLBACK && heardOn("audible");
-// Nothing at all has come back on any band → the speaker itself is the problem.
+// Show the volume hint only when NOTHING has ever come back, on any band, after
+// several attempts. Three guards, each for a failure seen in testing:
+//
+//   - `heardOn(...)` latches, so one confirmed self-hear suppresses the hint for the
+//     rest of the run. A device that demonstrably made sound must never later be
+//     told to turn the volume up just because a marginal ultrasound echo missed.
+//   - speakerProven (a peer's GOT/ANSWER) does the same, even if self-echo never
+//     worked — the peer heard us, so the volume is fine by definition.
+//   - MIN_MISSES gives it hysteresis. Beacons fire on ~55% of rounds and ultrasound
+//     self-echo is ~2/5 on real hardware, so one or two early misses are routine and
+//     must not raise an alarm; a genuinely silent speaker misses every single time.
+const MIN_MISSES_BEFORE_HINT = 3;
+const totalMissed = () => echo.ultrasound.missed + echo.audible.missed;
 const volumeLow = () =>
-  sentAny && !speakerProven && !micDead && !heardOn("ultrasound") && !heardOn("audible");
+  sentAny && !speakerProven && !micDead
+  && !heardOn("ultrasound") && !heardOn("audible")
+  && totalMissed() >= MIN_MISSES_BEFORE_HINT;
 
 const setAudioStatus = (t: string) => (S.audioStatus.value = t);
 const setProgress = (f: number | null) => (S.audioProgress.value = f);
+// Steps only ever advance. The handshake genuinely loops — an offer that wasn't
+// acknowledged gets resent, a missed answer sends us back to listening — but showing
+// that as the rail marching backwards is the very "it's stuck retrying" impression
+// the rail exists to dispel. soundAuto() resets it to "listen" when a run starts;
+// within a run it is monotonic.
+const stepIdx = (s: S.SoundStep) => S.STEPS.findIndex((x) => x.key === s);
+const setStep = (s: S.SoundStep) => {
+  if (stepIdx(s) > stepIdx(S.audioStep.value)) S.audioStep.value = s;
+};
+const resetStep = () => (S.audioStep.value = "listen");
 function soundBusyUI(on: boolean) { S.audioBusy.value = on; if (!on) { setAudioStatus("Pair by sound"); setProgress(null); } }
 export function stopSoundAuto() { autoRunning = false; abortAuto(); soundBusyUI(false); }
 
@@ -669,7 +694,9 @@ function matchBand() {
   if (S.bandMode.value === "auto") { setUltrasound(rxBand() === "ultrasound"); bandMatched = true; }
 }
 // Which band to beacon in. Ultrasound is the default and we STAY there: it is
-// inaudible, so a wrong guess costs the user nothing, whereas audible beacons are
+// inaudible to most adults, so a wrong guess is usually cheap (note: children and
+// teenagers often DO hear 15–18 kHz, which is why the band is user-overridable and
+// why we don't beacon more than we must), whereas audible beacons are
 // loud and genuinely unpleasant at close range. We leave it only on positive
 // evidence that this device can't hear its own ultrasound but CAN hear lower
 // frequencies (ultrasoundHopeless) — a device-specific verdict, not a reaction to
@@ -734,9 +761,15 @@ function proveSpeaker(why: string) {
 // capability evidence. This is the ONLY capability test: every frame we send is
 // also a check that our speaker works, so there is no separate probe phase.
 async function sendHeard(payload: Uint8Array, onprogress?: (f: number) => void) {
-  sentAny = true;
   const band = txBand();
-  const { heard, micDead: dead } = await withEchoCapture(payload, () => playFrame(payload, { onprogress }));
+  const { heard, micDead: dead, inconclusive } = await withEchoCapture(payload, () => playFrame(payload, { onprogress }));
+  // An inconclusive attempt tells us NOTHING: no sound was emitted (suspended
+  // AudioContext — routine on mobile whenever the page backgrounds or the screen
+  // dims) or we were torn down mid-frame. Counting those as misses is what made a
+  // phone with perfectly good audio drift into "Turn the volume up" after a while:
+  // each phantom miss accumulated even though the real checks had passed.
+  if (inconclusive) { slog("self-heard inconclusive — not counted", { band }); return; }
+  sentAny = true;
   // Tally per band: the fallback decision is comparative (see ultrasoundHopeless).
   if (heard) echo[band].heard++; else echo[band].missed++;
   // A decode of our own echo is still a decode: it proves the mic works too. And
@@ -753,6 +786,7 @@ export async function soundAuto() {
   autoRunning = true; resetAuto(); soundBusyUI(true);
   bandMatched = false; ackTick = 0;
   micOk = false; speakerProven = false; micDead = false; sentAny = false;
+  resetStep();
   for (const b of Object.keys(echo)) echo[b] = { heard: 0, missed: 0 };
   slog("soundAuto start", { role, myNonce, band: S.bandMode.value, loopback: S.loopbackMode });
   // No probe phase: we go straight to discovery, and the first beacon doubles as the
@@ -804,6 +838,7 @@ export async function soundAuto() {
     }
     if (peerNonce !== null) slog(`role resolved: ${myNonce > peerNonce ? "OFFERER" : "answerer"} (peer ${peerNonce})`);
 
+    setStep("exchange");
     // ── PHASE 2: DIRECTED EXCHANGE ──
     // Offerer = higher nonce and still holding an offer. The lower-nonce device is
     // the answerer, but can only build its answer once it has received the offer.
@@ -857,6 +892,9 @@ export async function soundAuto() {
         setAudioStatus("Sending your reply…"); setProgress(0);
         await sendHeard(myAudio!, setProgress); setProgress(null);
         if (!alive()) break;
+        // Our answer is out, so both descriptions exist and WebRTC is dialling —
+        // any further sound is just a resend in case the answer was missed.
+        setStep("connect");
         // Brief listen; silence or a re-heard offer both mean our answer may have
         // missed → the loop resends. WebRTC connecting is the real ack.
         const f = await hear(rand(3500, 2000));

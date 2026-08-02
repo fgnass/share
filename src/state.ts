@@ -32,6 +32,19 @@ export const camError = signal(false);
 export const audioStatus = signal("Pair by sound");
 export const audioBusy = signal(false);
 export const audioProgress = signal<number | null>(null); // 0..1 or null
+// Which stage of the sound handshake we're in. The progress bar tracks a single
+// frame, so it legitimately restarts several times per pairing — without a coarser
+// indicator that reads as "it keeps retrying" rather than "it moved on".
+//   listen   — beaconing and listening for the other device (also self-checks audio)
+//   exchange — codes are being sent/received (the long frames)
+//   connect  — both codes exchanged, WebRTC is dialling
+export type SoundStep = "listen" | "exchange" | "connect";
+export const STEPS: { key: SoundStep; label: string }[] = [
+  { key: "listen", label: "Listening" },
+  { key: "exchange", label: "Exchanging" },
+  { key: "connect", label: "Connecting" },
+];
+export const audioStep = signal<SoundStep>("listen");
 // ?band=audible|ultrasound presets the band (handy for testing); default auto.
 const bandParam = new URLSearchParams(location.search).get("band") as BandMode | null;
 export const bandMode = signal<BandMode>(bandParam === "audible" || bandParam === "ultrasound" ? bandParam : "auto");
