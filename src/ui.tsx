@@ -1,13 +1,12 @@
-import { createElement as lucide, Paperclip, Send, FileText, Download, QrCode, ScanLine, X, Share2, Copy, Link2, Github, Volume2, Mic, RefreshCw, ArrowLeft, FolderDown, FolderUp, FolderCheck, Folder, Check } from "lucide";
+import { createElement as lucide, Paperclip, Send, FileText, Download, ScanLine, X, Share2, Copy, Link2, Github, RefreshCw, ArrowLeft, FolderDown, FolderUp, FolderCheck, Folder } from "lucide";
 import QRCode from "qrcode";
 import { useEffect, useRef } from "preact/hooks";
 
 const ICONS: Record<string, any> = {
   paperclip: Paperclip, send: Send, file: FileText, download: Download,
-  "qr-code": QrCode, scan: ScanLine, x: X, share: Share2, copy: Copy, link: Link2,
-  github: Github, volume: Volume2, mic: Mic, switch: RefreshCw, back: ArrowLeft,
+  scan: ScanLine, x: X, share: Share2, copy: Copy, link: Link2,
+  github: Github, switch: RefreshCw, back: ArrowLeft,
   "folder-down": FolderDown, "folder-up": FolderUp, "folder-check": FolderCheck, folder: Folder,
-  check: Check,
 };
 
 export function Icon({ name }: { name: string }) {

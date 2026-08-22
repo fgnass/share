@@ -8,8 +8,7 @@ import { signal } from "@preact/signals";
 export const BUILD_ID = typeof __BUILD_ID__ === "string" ? __BUILD_ID__ : "dev";
 
 export type Screen = "choose" | "how" | "pair" | "handoff" | "room";
-export type Method = "camera" | "sound" | "link";
-export type BandMode = "auto" | "audible" | "ultrasound";
+export type Method = "camera" | "link";
 
 export type Msg =
   | { id: number; kind: "sys"; text: string }
@@ -27,49 +26,6 @@ export const qrUrl = signal("");            // URL rendered as the QR (empty = n
 export const myLink = signal("");           // shareable link (link method)
 export const camOn = signal(false);         // camera preview visible
 export const camError = signal(false);
-
-// Sound
-export const audioStatus = signal("Pair by sound");
-export const audioBusy = signal(false);
-export const audioProgress = signal<number | null>(null); // 0..1 or null
-// Which stage of the sound handshake we're in. The progress bar tracks a single
-// frame, so it legitimately restarts several times per pairing — without a coarser
-// indicator that reads as "it keeps retrying" rather than "it moved on".
-//
-// Deliberately NOUNS: the two devices traverse the exchange in opposite orders (one
-// sends the offer and waits for the reply, the other waits then replies), so a verb
-// would be wrong on one of them. "Offer" is a thing that exists, not an act — true on
-// both sides, one label set, no role-awareness needed.
-//   check — audio confirmed working (we heard our own beacon, or the peer's frame)
-//   find  — the other device has been heard and who-offers is resolved
-//   offer — the offer exists here, sent or received
-//   reply — the answer exists here, sent or received
-//   done  — both descriptions exchanged; WebRTC takes over from here
-//
-// "find" exists because discovery is a real phase the rail used to hide: after the
-// audio check passes, the two devices beacon at each other and compare nonces to settle
-// who sends the offer. That is what "Looking for the other device…" IS — it is neither
-// part of the audio check nor the offer, and leaving it inside "check" meant the first
-// step stayed active while showing a message about something else entirely.
-export type SoundStep = "check" | "find" | "offer" | "reply" | "done";
-export const STEPS: { key: SoundStep; label: string }[] = [
-  { key: "check", label: "Check" },
-  { key: "find", label: "Find" },
-  { key: "offer", label: "Offer" },
-  { key: "reply", label: "Reply" },
-  { key: "done", label: "Done" },
-];
-export const audioStep = signal<SoundStep>("check");
-// True while the Check gate is failing (nothing audible came back, or the mic never
-// delivered audio). Marks the first step as a problem rather than letting the rail
-// look like it simply hasn't got there yet.
-export const audioTrouble = signal(false);
-// We can hear the peer but don't know how much of the frame we'll get (no chirp lock,
-// so no length). The bar sweeps instead of claiming a percentage it doesn't have.
-export const audioIndeterminate = signal(false);
-// ?band=audible|ultrasound presets the band (handy for testing); default auto.
-const bandParam = new URLSearchParams(location.search).get("band") as BandMode | null;
-export const bandMode = signal<BandMode>(bandParam === "audible" || bandParam === "ultrasound" ? bandParam : "auto");
 
 // STUN is off by default (same-network pairing contacts nothing external). It is
 // turned on automatically when a direct attempt fails and the user confirms, or
@@ -100,22 +56,6 @@ export const messages = signal<Msg[]>([]);
 export const canInstall = signal(false);
 export const isIOS = signal(/iphone|ipad|ipod/i.test(navigator.userAgent) &&
   !(matchMedia("(display-mode: standalone)").matches || (navigator as any).standalone === true));
-
-// ── Dev debug view (add ?debug to the URL) ──
-// Fed by music.ts's debug sink (wired in App). Lets us see, on a real device,
-// exactly which tones the mic picks up and how the decoder/self-test behave.
-export const debug = new URLSearchParams(location.search).has("debug");
-// ?loopback: two tabs pair over a BroadcastChannel instead of real audio — lets
-// us test the handshake locally without a mic/speaker. Implies verbose logging.
-export const loopbackMode = new URLSearchParams(location.search).has("loopback");
-export const dbgSpectrum = signal<any>(null);   // latest {sr, state, spectrum:{audible,ultrasound}}
-export const dbgState = signal<string>("idle");
-export const dbgMonitor = signal(false);        // standalone live monitor running
-export const dbgLog = signal<string[]>([]);
-export function dbgPush(line: string) {
-  const stamp = new Date().toLocaleTimeString().split(" ")[0];
-  dbgLog.value = [...dbgLog.value.slice(-40), `${stamp}  ${line}`];
-}
 
 let msgId = 0;
 export const nextId = () => ++msgId;

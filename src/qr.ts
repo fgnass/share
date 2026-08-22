@@ -1,4 +1,4 @@
-// ── QR pairing: embrace the race ─────────────────────────────────────────────
+// ── Pairing: embrace the race ────────────────────────────────────────────────
 // Both devices show an offer and both scan. When we see their offer we build an
 // answer to it — WITHOUT discarding our own offer. Two negotiations then run
 // concurrently and the first datachannel to open wins (conn.wireChannel adopts
@@ -10,19 +10,10 @@
 // loser or the winner and then displayed instructions describing the *other*
 // device's job. Racing removes the decision entirely: whoever connects first is
 // the winner, discovered rather than negotiated.
-//
-// The sound route cannot do this — it is half-duplex, so two long transmissions
-// collide and exactly one device may talk at a time. That is the whole reason
-// these two routes are separate files (see conn.ts).
 import jsQR from "jsqr";
-import { linkFor, parseCode, freshNonce, decode } from "./webrtc";
+import { linkFor, parseCode, decode } from "./webrtc";
 import * as C from "./conn";
 import * as S from "./state";
-
-// The nonce stays in the wire format (the sound route arbitrates with it, and
-// dropping the field would break pairing against older builds) — this route just
-// never reads the peer's. Ours is random per session and only pads the packet.
-const nonce = freshNonce();
 
 let myOffer: C.Neg | null = null;     // our offer — displayed, never torn down
 let myAnswer: C.Neg | null = null;    // our answer to their offer, once seen
@@ -47,8 +38,9 @@ function show() {
 // ended up telling you to scan on the device that had nothing left to scan.
 function say() {
   if (C.isEntered()) return setStatus("Connected", "ok");
-  if (myAnswer) setStatus("Reply ready — keep both codes facing each other.");
-  else setStatus("Point the devices at each other.");
+  const cam = S.method.value === "camera";
+  if (myAnswer) setStatus(cam ? "Reply ready — keep both codes facing each other." : "Reply ready — send it back to them.");
+  else setStatus(cam ? "Point the devices at each other." : "Waiting for them to open the link…");
 }
 
 // ── Scanning ──
@@ -110,7 +102,7 @@ async function onScan(parsed: { type: string; code: string }) {
     if (answeredCode === parsed.code) return;
     try {
       answeredCode = parsed.code;
-      myAnswer = await C.makeAnswer(parsed.code, nonce, C.wireChannel);
+      myAnswer = await C.makeAnswer(parsed.code, C.wireChannel);
       C.track(myAnswer);
       show(); say();
       armWatch();
@@ -135,8 +127,7 @@ async function onScan(parsed: { type: string; code: string }) {
   }
 }
 
-// decode() returns {type, sdp, nonce}; we only want the SDP here — the type is
-// already known from the URL prefix and the nonce is the sound route's business.
+// decode() also reports offer-vs-answer, but the URL prefix already told us that.
 function decodeSdp(code: string): string { return decode(code).sdp; }
 
 // ── Direct-connection watchdog ──
@@ -168,23 +159,32 @@ export async function retryWithStun() {
   await start();
 }
 
+// Re-present the existing negotiations under a different method. Nothing about
+// the handshake changes — only whether we draw a QR and how the status reads.
+export function setMethod(m: S.Method) {
+  S.method.value = m;
+  S.camOn.value = m === "camera" && !C.isEntered();
+  S.pairIntro.value = m === "camera"
+    ? "Point the two devices at each other. Each shows a code and reads the other's. Data goes straight between the devices. Nothing is uploaded."
+    : "Send this link to the other device over any chat, and keep this tab open until they join.";
+  show(); say();
+}
+
 // ── Entry ──
 export async function start() {
-  S.pairIntro.value = "Point the two devices at each other. Each shows a code and reads the other's. Data goes straight between the devices. Nothing is uploaded.";
-  S.camOn.value = S.method.value === "camera";
-  myOffer = await C.makeOffer(nonce, C.wireChannel);
+  myOffer = await C.makeOffer(C.wireChannel);
   C.track(myOffer);
-  show(); say();
+  setMethod(S.method.value);
 }
 
 // Pasted or opened as a link (#o=…): we only answer, there is no race to run
 // because we never showed an offer they could scan.
 export async function startFromCode(code: string) {
-  S.pairIntro.value = "Almost there. Show this reply code to the other device, or send it back the same way you got their code.";
+  S.pairIntro.value = "Almost there. Send this reply code back the same way you got theirs — or show it to their camera.";
   S.camOn.value = false;
   try {
     answeredCode = code;
-    myAnswer = await C.makeAnswer(code, nonce, C.wireChannel);
+    myAnswer = await C.makeAnswer(code, C.wireChannel);
     C.track(myAnswer);
     show(); say(); armWatch();
   } catch (e) {
@@ -214,7 +214,7 @@ export function wireHandoff(bc: BroadcastChannel) {
 
 // Dev/test hook (?debug): drive the handshake without a camera by injecting the
 // peer's code, exactly as a scan would. Lets the race be tested deterministically.
-if (S.debug || S.loopbackMode) {
+if (new URLSearchParams(location.search).has("debug")) {
   (globalThis as any).__qr = {
     scan: (text: string) => { const p = parseCode(text); return p ? acceptPasted(p) : null; },
     code: () => S.myLink.value,

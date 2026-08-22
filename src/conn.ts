@@ -1,20 +1,11 @@
-// ── Shared connection core ───────────────────────────────────────────────────
-// Everything both pairing routes (QR and sound) need, and nothing either one
-// needs alone. The routes differ ONLY in how they get the two SDPs across:
+// ── Connection core ──────────────────────────────────────────────────────────
+// RTCPeerConnection lifecycle, the datachannel, and everything that rides it
+// (chat, files, connection health). Knows nothing about how the two SDPs got
+// across — that is qr.ts's job.
 //
-//   qr.ts    — both codes are visible at once, so both devices offer AND answer
-//              and the first datachannel to open wins. No roles, no tiebreak.
-//   sound.ts — half-duplex: two devices transmitting long frames collide, so
-//              exactly one may talk at a time. Roles are mandatory there, and
-//              nonces settle them.
-//
-// That asymmetry is why the routes are separate files rather than one function
-// with a `method` flag: the QR path's whole point is that it does NOT need the
-// arbitration the sound path cannot do without.
-//
-// A `Neg` is one in-flight negotiation. The QR route holds two (our offer, and
-// our answer to theirs); the sound route holds one. Whoever's channel opens
-// first calls adopt() and the losers are dropped.
+// A `Neg` is one in-flight negotiation. Pairing holds two of them: our own offer
+// and our answer to the peer's. Both stay alive; whichever datachannel opens
+// first is adopted and the loser is dropped.
 import { CHUNK, HIGH_WATER, LOW_WATER, iceComplete, packDesc, b64u, decode } from "./webrtc";
 import * as S from "./state";
 
@@ -22,7 +13,6 @@ export type Neg = {
   tag: string;                      // "offer" | "answer" — for logs only
   pc: RTCPeerConnection;
   code: string;                     // our local description, packed + base64url
-  packed: Uint8Array;               // same bytes, pre-base64 (the sound route needs these)
 };
 
 export const rtcConfig = (): RTCConfiguration =>
@@ -77,28 +67,26 @@ function enterRoom() {
 // Both builders fully gather ICE before returning, so the returned code is final
 // and safe to display or transmit. `onChannel` is handed every datachannel that
 // belongs to this negotiation; the routes pass wireChannel.
-export async function makeOffer(nonce: number, onChannel: (ch: RTCDataChannel, pc: RTCPeerConnection) => void): Promise<Neg> {
+export async function makeOffer(onChannel: (ch: RTCDataChannel, pc: RTCPeerConnection) => void): Promise<Neg> {
   const pc = new RTCPeerConnection(rtcConfig());
   wireHealth(pc);
   onChannel(pc.createDataChannel("data"), pc);
   await pc.setLocalDescription(await pc.createOffer());
   await iceComplete(pc);
-  const packed = packDesc(pc.localDescription!, nonce);
-  const neg: Neg = { tag: "offer", pc, code: b64u(packed), packed };
+  const neg: Neg = { tag: "offer", pc, code: b64u(packDesc(pc.localDescription!)) };
   logGen("offer", pc.localDescription!.sdp, neg);
   return neg;
 }
 
 // Throws if `code` isn't a usable offer — callers surface that as "invalid code".
-export async function makeAnswer(code: string, nonce: number, onChannel: (ch: RTCDataChannel, pc: RTCPeerConnection) => void): Promise<Neg> {
+export async function makeAnswer(code: string, onChannel: (ch: RTCDataChannel, pc: RTCPeerConnection) => void): Promise<Neg> {
   const pc = new RTCPeerConnection(rtcConfig());
   wireHealth(pc);
   pc.ondatachannel = (e) => onChannel(e.channel, pc);
   await pc.setRemoteDescription(decode(code) as any);
   await pc.setLocalDescription(await pc.createAnswer());
   await iceComplete(pc);
-  const packed = packDesc(pc.localDescription!, nonce);
-  const neg: Neg = { tag: "answer", pc, code: b64u(packed), packed };
+  const neg: Neg = { tag: "answer", pc, code: b64u(packDesc(pc.localDescription!)) };
   logGen("answer", pc.localDescription!.sdp, neg);
   return neg;
 }

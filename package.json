@@ -12,8 +12,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
-    "test": "node --import ./test/register.mjs test/selftest.mjs"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@preact/signals": "^2.9.3",

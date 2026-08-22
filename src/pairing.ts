@@ -1,22 +1,15 @@
 // ── Pairing router ──────────────────────────────────────────────────────────
-// Thin shell over three pieces that no longer know about each other:
+// Thin shell over two pieces:
 //
-//   conn.ts   — RTCPeerConnection lifecycle, the datachannel, chat + files.
-//               Shared: both routes end in exactly the same room.
-//   qr.ts     — QR route. Both devices offer AND answer; first channel to open
-//               wins. No roles, no nonce tiebreak (both codes are visible at
-//               once, so there is nothing to arbitrate).
-//   sound.ts  — Sound route. Half-duplex, so one device talks at a time and the
-//               roles MUST be agreed up front; nonces do that.
+//   conn.ts — RTCPeerConnection lifecycle, the datachannel, chat + files.
+//   qr.ts   — the handshake. Both devices offer AND answer; the first
+//             datachannel to open wins. No roles, no tiebreak: both codes are
+//             visible at once, so there is nothing to arbitrate.
 //
-// The two routes used to share one `onScan` plus one set of role/committed/applied
-// singletons. They pulled in opposite directions: the sound path needs roles, the
-// QR path is better off without them, and the compromise produced a QR handshake
-// that told each device to perform the other one's step. Keeping them apart is the
-// point of this file being boring.
+// "camera" and "link" are the same negotiation — they differ only in how the
+// offer reaches the peer (a QR their camera reads, or a URL you send them).
 import * as C from "./conn";
 import * as QR from "./qr";
-import * as Sound from "./sound";
 import * as S from "./state";
 import { decode, linkFor, parseCode } from "./webrtc";
 import { method as methodS } from "./state";
@@ -24,8 +17,8 @@ import { method as methodS } from "./state";
 const bc = new BroadcastChannel("share.gnass.buzz");
 const setStatus = (text: string, dot = "wait") => (S.pairStatus.value = { text, dot });
 
-// Which route is live. null = still on the chooser.
-let active: "camera" | "sound" | "link" | null = null;
+// Whether pairing has started. null = still on the chooser.
+let active: S.Method | null = null;
 export const inPairing = () => active !== null;
 
 // ── Re-exports: the UI talks to one module ──
@@ -36,9 +29,6 @@ export const fromDataTransfer = C.fromDataTransfer;
 export const pickSaveDir = C.pickSaveDir;
 export const clearSaveDir = C.clearSaveDir;
 export type Upload = C.Upload;
-export const stopSoundAuto = Sound.stopSoundAuto;
-export const soundAuto = Sound.soundAuto;
-export const slogBuf = Sound.slogBuf;
 export const stopCamera = QR.stopCamera;
 export const retryWithStun = QR.retryWithStun;
 
@@ -53,21 +43,18 @@ export function registerVideo(el: HTMLVideoElement | null) {
 }
 
 // ── Method selection ──
+// Both methods run the same handshake; "link" just hides the QR and shows a URL
+// (the peer opens it and lands in startFromCode).
 export async function chooseMethod(m: S.Method) {
-  methodS.value = m;
   S.screen.value = "pair";
-  if (active === m) return;          // already running this route
-  QR.stopCamera(); Sound.stopSoundAuto();
+  if (active) return QR.setMethod(m);   // already pairing — just re-present it
   active = m;
-  if (m === "sound") return void Sound.start();
-  // "link" shares the same offer as the QR route — it just shows a URL instead of
-  // a QR code, and the peer opens it (arriving via startFromCode on their side).
+  methodS.value = m;
   await QR.start();
-  if (m === "link") { S.camOn.value = false; S.qrUrl.value = ""; }
 }
 
 export const chooseBack = () => (S.screen.value = "pair");
-export function switchMethod() { QR.stopCamera(); Sound.stopSoundAuto(); S.screen.value = "choose"; }
+export function switchMethod() { QR.stopCamera(); S.screen.value = "choose"; }
 
 export function applyPaste(text: string) {
   const parsed = parseCode(text);
@@ -109,13 +96,6 @@ export function initRouting() {
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.has("o")) { active = "camera"; QR.startFromCode(hash.get("o")!); S.screen.value = "pair"; }
   else if (hash.has("a")) startHandoff(hash.get("a")!);
-  // Dev/test: ?autosound jumps straight into sound pairing (needs a browser that
-  // allows AudioContext without a gesture, e.g. --autoplay-policy=...).
-  else if (new URLSearchParams(location.search).has("autosound")) {
-    active = "sound"; methodS.value = "sound";
-    S.screen.value = "pair";
-    Sound.start().then(Sound.soundAuto);
-  }
   else S.screen.value = "choose";
 }
 

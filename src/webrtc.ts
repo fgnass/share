@@ -5,7 +5,7 @@
 // on the other side. Cuts the link/QR payload from ~720 to ~170 chars.
 
 export type Cand = { addr: string; port: number; type: string };
-export type Fields = { u: string; p: string; f: string; s: string; c: Cand[]; nonce: number };
+export type Fields = { u: string; p: string; f: string; s: string; c: Cand[] };
 
 const _enc = new TextEncoder(), _dec = new TextDecoder();
 const SETUP = ["actpass", "active", "passive", "holdconn"];
@@ -13,10 +13,6 @@ const CTYPE = ["host", "srflx"]; // host = same LAN, srflx = across NATs (needs 
 
 export const CHUNK = 16 * 1024;
 export const HIGH_WATER = 4 * 1024 * 1024, LOW_WATER = 1 * 1024 * 1024;
-
-// A per-device 16-bit tiebreaker. On a tie we reroll to a fresh random value
-// (NOT +1, which would keep two equal nonces equal forever → livelock).
-export const freshNonce = () => { const r = crypto.getRandomValues(new Uint8Array(2)); return (r[0] << 8) | r[1]; };
 
 export function b64u(b: Uint8Array): string {
   let s = ""; for (const x of b) s += String.fromCharCode(x);
@@ -30,7 +26,7 @@ export function unb64u(str: string): Uint8Array {
 }
 
 // Pull the variable fields out of a real localDescription SDP.
-export function extract(sdp: string): Omit<Fields, "nonce"> {
+export function extract(sdp: string): Fields {
   let c: Cand[] = [...sdp.matchAll(/a=candidate:\S+ \d+ (udp) \d+ (\S+) (\d+) typ (host|srflx)/gi)]
     .map((m) => ({ addr: m[2], port: +m[3], type: m[4] }));
   // Drop literal IPv6 candidates (address contains ':') as long as something
@@ -61,11 +57,10 @@ export function build(x: Fields): string {
     "a=sctp-port:5000", "a=max-message-size:262144", ...cands, "",
   ].join("\r\n");
 }
-// Binary pack/unpack. A leading 16-bit nonce is the per-device tiebreaker.
+// Binary pack/unpack.
 export function pack(x: Fields): Uint8Array {
   const b: number[] = [];
   const put = (s: string) => { const e = _enc.encode(s); b.push(e.length, ...e); };
-  b.push((x.nonce >> 8) & 255, x.nonce & 255);
   b.push(Math.max(0, SETUP.indexOf(x.s)));
   put(x.u); put(x.p);
   b.push(...x.f.split(":").map((h) => parseInt(h, 16))); // 32 bytes
@@ -76,24 +71,21 @@ export function pack(x: Fields): Uint8Array {
 export function unpack(b: Uint8Array): Fields {
   let i = 0;
   const get = () => { const n = b[i++]; const s = _dec.decode(b.slice(i, i + n)); i += n; return s; };
-  const nonce = (b[i] << 8) | b[i + 1]; i += 2;
   const s = SETUP[b[i++]];
   const u = get(), p = get();
   const f = [...b.slice(i, i + 32)].map((x) => x.toString(16).padStart(2, "0")).join(":"); i += 32;
   const n = b[i++], c: Cand[] = [];
   for (let k = 0; k < n; k++) { const type = CTYPE[b[i++]]; const addr = get(); const port = (b[i] << 8) | b[i + 1]; i += 2; c.push({ type, addr, port }); }
-  return { u, p, f, s, c, nonce };
+  return { u, p, f, s, c };
 }
 
-export const packDesc = (desc: RTCSessionDescription, nonce: number) => pack({ ...extract(desc.sdp), nonce });
-export const encode = (desc: RTCSessionDescription, nonce: number) => b64u(packDesc(desc, nonce));
+export const packDesc = (desc: RTCSessionDescription) => pack(extract(desc.sdp));
+// The setup role tells offer from answer: only an offer says "actpass".
 export function decode(code: string) {
   const f = unpack(unb64u(code));
-  return { type: f.s === "actpass" ? "offer" : "answer", sdp: build(f), nonce: f.nonce } as
-    { type: "offer" | "answer"; sdp: string; nonce: number };
+  return { type: f.s === "actpass" ? "offer" : "answer", sdp: build(f) } as
+    { type: "offer" | "answer"; sdp: string };
 }
-// Prefix a 1-byte role marker ('o'/'a') so the audio receiver knows offer vs answer.
-export const withType = (t: number, bytes: Uint8Array) => { const a = new Uint8Array(bytes.length + 1); a[0] = t; a.set(bytes, 1); return a; };
 
 // Resolve once ICE gathering is done. Some networks (blocked STUN, VPN, privacy
 // extensions) never reach "complete", so also resolve on the end-of-candidates

@@ -2,32 +2,25 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { effect } from "@preact/signals";
 import * as S from "./state";
 import * as P from "./pairing";
-import * as Music from "./music";
 import { install } from "./pwa";
 import { keepAwake } from "./wakelock";
 import { Icon, Qr, fmt } from "./ui";
 
+const DEBUG = new URLSearchParams(location.search).has("debug");
+
 export function App() {
   const s = S.screen.value;
   // Hold a screen wake lock through the active flow so the phone doesn't sleep
-  // mid-pairing (which suspends the tab and kills the sound loop).
+  // mid-pairing (a suspended tab drops the connection).
   useEffect(() => { keepAwake(s === "pair" || s === "handoff" || s === "room"); }, [s]);
   useEffect(() => {
-    if (S.loopbackMode) Music.setLoopback(true);
-    if (!S.debug) return;
+    if (!DEBUG) return;
     // Console/automation handle + live state in the tab title, so an automated
     // test can watch progress from outside (e.g. via the CDP /json page list).
-    (globalThis as any).__dbg = { S, P, Music };
-    const unTitle = effect(() => {
-      document.title = S.screen.value === "room" ? "CONNECTED" : `${S.screen.value} · ${S.audioStatus.value}`;
+    (globalThis as any).__dbg = { S, P };
+    return effect(() => {
+      document.title = S.screen.value === "room" ? "CONNECTED" : `${S.screen.value} · ${S.pairStatus.value.text}`;
     });
-    Music.setDebugSink((e: any) => {
-      if (e.t === "spectrum") { S.dbgSpectrum.value = e; S.dbgState.value = e.state; }
-      else if (e.t === "selfheard") { S.dbgPush(`self-heard: ${e.heard ? "yes" : e.micDead ? "MIC DEAD" : "no"} (n=${e.samples}, rms ${e.rms.toExponential(1)})`); console.log("%c[codec] self-heard", "color:#ffd479", e); }
-      else if (e.t === "sync") { S.dbgPush(`sync locked · ${e.band}`); console.log("%c[codec] sync locked", "color:#acff69", e.band, "corr", e.corr); }
-      else if (e.t === "frame") { const s = e.ok ? "OK ✓" : e.corrected ? "CRC FAIL ✗" : "RS FAIL ✗"; S.dbgPush(`frame ${s} · ${e.band} · ${e.len}B (${e.bytes}B coded)`); console.log("%c[codec] frame " + s, "color:#acff69", { band: e.band, len: e.len, coded: e.bytes, rsDecoded: e.corrected }); }
-    });
-    return () => { Music.setDebugSink(null); unTitle(); };
   }, []);
   return (
     <main>
@@ -36,7 +29,6 @@ export function App() {
       {s === "pair" && <Pair />}
       {s === "handoff" && <Handoff />}
       {s === "room" && <Room />}
-      {S.debug && <DebugPanel />}
     </main>
   );
 }
@@ -48,10 +40,9 @@ function Choose() {
       <p class="lead">Send messages and files straight between two devices. No account, no server, nothing uploaded.</p>
       <div class="row">
         <button onClick={() => P.chooseMethod("camera")}><Icon name="scan" />Scan QR</button>
-        <button onClick={() => P.chooseMethod("sound")}><Icon name="volume" />Sound</button>
       </div>
       <button class="ghost" onClick={() => P.chooseMethod("link")}><Icon name="link" />Send a link</button>
-      <p class="hint">Pick the same method on both devices. QR shows a code that each device's camera reads. Sound plays the code as a short tune the other device hears through its mic. A link works anywhere: send it over any chat and paste the reply back.</p>
+      <p class="hint">QR is the quickest when both devices are in the same room: each shows a code and reads the other's. A link works anywhere — send it over any chat and paste the reply back.</p>
       {S.canInstall.value && (
         <button id="installBtn" class="ghost" onClick={install}><Icon name="download" />Save for offline use</button>
       )}
@@ -80,14 +71,13 @@ function How() {
       <p class="sub">How it works</p>
       <ol class="steps">
         <li><span>1</span>Open this page on both devices and tap Connect.</li>
-        <li><span>2</span>Pick the same pairing method on both: QR, sound, or a link.</li>
+        <li><span>2</span>Pair them: scan a QR code, or send a link.</li>
         <li><span>3</span>Chat and send files, straight between you.</li>
       </ol>
       <div class="how">
-        <p><b>Three ways to pair.</b> The two devices swap a short setup code to link up, and you choose how it travels:</p>
+        <p><b>Two ways to pair.</b> The two devices swap a short setup code to link up, and you choose how it travels:</p>
         <ul class="how-methods">
-          <li><b>QR:</b> each device shows a code and reads the other's with its camera.</li>
-          <li><b>Sound:</b> tap Pair on both devices and hold them close. They chirp soft musical notes back and forth (not a harsh chirp) and listen through the mic, taking turns on their own until they're linked. A device on its own never transmits its code, so nothing gets sent into an empty room.</li>
+          <li><b>QR:</b> each device shows a code and reads the other's with its camera. Both read at once and whichever connects first wins, so there is no order to get right.</li>
           <li><b>Link:</b> send the code as a link over any chat, then paste the reply the other device sends back. Works between any two devices, anywhere.</li>
         </ul>
         <p><b>Direct and private.</b> Messages and files travel straight between the two devices over an encrypted connection. Nothing is uploaded, stored, or seen by any server.</p>
@@ -109,14 +99,11 @@ function Pair() {
         <div class="paircol">
           {m === "camera" && <p id="pairIntro">{S.pairIntro.value}</p>}
           {m === "camera" && <Camera />}
-          {m === "sound" && <SoundPanel />}
           {m === "link" && <LinkPanel />}
-          {m !== "sound" && (
-            <div class="status">
-              <span id="pairDot" class={"dot " + S.pairStatus.value.dot} />
-              <span id="pairStatus">{S.pairStatus.value.text}</span>
-            </div>
-          )}
+          <div class="status">
+            <span id="pairDot" class={"dot " + S.pairStatus.value.dot} />
+            <span id="pairStatus">{S.pairStatus.value.text}</span>
+          </div>
           {S.stunPrompt.value && (
             <div class="stunprompt">
               <p>Couldn't connect directly — the devices may be on different networks. Retry using a STUN server to help them find each other? It only relays their addresses; your data still goes straight between them.</p>
@@ -147,61 +134,6 @@ function Camera() {
 // Labels are nouns, because the two devices traverse the exchange in opposite orders
 // (one sends the offer and awaits the reply, the other the reverse) — a noun names a
 // thing that exists and is therefore true on both sides.
-function SoundSteps() {
-  const cur = S.audioStep.value;
-  const at = S.STEPS.findIndex((s) => s.key === cur);
-  // Check is a gate: while audio is unproven the first step stays active and shows
-  // the problem, instead of the rail implying we've moved on.
-  const stuck = S.audioTrouble.value;
-  return (
-    <ol class="soundsteps" aria-label="Pairing progress">
-      {S.STEPS.map((s, i) => {
-        const state = i < at ? "done" : i === at ? "at" : "";
-        const bad = stuck && i === 0 && at === 0;
-        return (
-          <li class={state + (bad ? " bad" : "")} aria-current={i === at ? "step" : undefined}>
-            <span class="dot" aria-hidden="true">{bad ? "!" : i < at ? <Icon name="check" /> : i + 1}</span>
-            {s.label}
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
-function SoundPanel() {
-  const busy = S.audioBusy.value;
-  const pct = S.audioProgress.value == null ? 0 : Math.round(S.audioProgress.value * 100);
-  // Hearing them but no chirp lock ⇒ no length ⇒ no honest percentage. Sweep instead.
-  const indet = S.audioIndeterminate.value;
-  return (
-    <div id="soundPanel">
-      <p>Hold the two devices close and tap Pair on both. They negotiate who sends and chirp back and forth on their own until they're linked.</p>
-      {busy && <SoundSteps />}
-      <div id="soundCtl" class={"soundbtn" + (busy ? " busy" : "") + (indet ? " indet" : "")}
-           onClick={() => { if (!busy) P.soundAuto(); }}>
-        <span class="soundmsg">{S.audioStatus.value}</span>
-        <span class="soundfill" aria-hidden="true" style={`clip-path: inset(0 ${100 - pct}% 0 0)`}>
-          <span class="soundmsg">{S.audioStatus.value}</span>
-        </span>
-        <button id="soundCancel" class={"soundx" + (busy ? "" : " hidden")} aria-label="Cancel"
-                onClick={(e) => { e.stopPropagation(); P.stopSoundAuto(); }}><Icon name="x" /></button>
-      </div>
-      <details class="advanced">
-        <summary>Advanced</summary>
-        <label class="pick">Sound
-          <select value={S.bandMode.value} onChange={(e) => (S.bandMode.value = (e.target as HTMLSelectElement).value as S.BandMode)}>
-            <option value="auto">Auto (prefer ultrasound)</option>
-            <option value="audible">Audible tones</option>
-            <option value="ultrasound">Ultrasound (~15.6–18 kHz)</option>
-          </select>
-        </label>
-        <p class="hint">Auto picks whichever the two devices actually hear. Ultrasound (~15.6–18 kHz) is inaudible to most adults, but children and teenagers often hear it clearly — pick Audible tones if that's a problem. Some speakers and mics can't manage ultrasound at all.</p>
-      </details>
-    </div>
-  );
-}
-
 function LinkPanel() {
   const paste = useRef<HTMLTextAreaElement>(null);
   return (
@@ -349,76 +281,6 @@ function Bubble({ m }: { m: S.Msg }) {
         {" · "}{fmt(m.size)}
       </div>
       {!m.done && <div class="bar"><i style={`width:${m.progress}%`} /></div>}
-    </div>
-  );
-}
-
-// ── Dev debug view (?debug) ──────────────────────────────────────────────────
-const FREQS = Music.bandFreqs();
-
-function SpecRow({ label, fr, d, max }: any) {
-  // Height on a dB scale: show the top 48 dB below the loudest bin on screen.
-  const bar = (v: number) => Math.max(0, Math.min(100, ((10 * Math.log10(v / max) + 48) / 48) * 100));
-  const peak = Math.max(d.marker, ...d.notes);
-  return (
-    <div class="specrow">
-      <span class="slbl">{label}</span>
-      <i class="sbar mk" style={`height:${bar(d.marker)}%`} title={`marker ${Math.round(fr.marker)}Hz`} />
-      {d.notes.map((v: number, i: number) => (
-        <i class={"sbar" + (v === peak ? " pk" : "")} style={`height:${bar(v)}%`} title={`${Math.round(fr.notes[i])}Hz`} />
-      ))}
-    </div>
-  );
-}
-
-function DebugPanel() {
-  const spec = S.dbgSpectrum.value;
-  const log = S.dbgLog.value;
-  const mon = S.dbgMonitor.value;
-  const [busy, setBusy] = useState(false);
-
-  // There is no standalone self-test any more: the capability check only exists as
-  // a side effect of transmitting. So send one beacon in each band and report what
-  // came back — exactly what the pairing loop does every round.
-  const runTest = async () => {
-    setBusy(true);
-    for (const band of ["ultrasound", "audible"]) {
-      Music.setUltrasound(band === "ultrasound");
-      const payload = new Uint8Array([0xac, 0x00, 0x00]);
-      crypto.getRandomValues(payload.subarray(1));
-      try {
-        const r = await Music.withEchoCapture(payload, () => Music.playFrame(payload));
-        S.dbgPush(`${band}: ${r.heard ? "heard own beacon" : r.micDead ? "MIC DEAD" : "not heard"}`);
-      } catch (e) { S.dbgPush(`${band}: failed — ${e}`); }
-    }
-    setBusy(false);
-  };
-  const toggleMon = async () => {
-    if (mon) { Music.stopMonitor(); S.dbgMonitor.value = false; S.dbgPush("monitor off"); }
-    else { try { await Music.startMonitor(); S.dbgMonitor.value = true; S.dbgPush("monitor on"); } catch (e) { S.dbgPush("monitor failed: " + e); } }
-  };
-
-  const all = spec
-    ? [spec.spectrum.audible.marker, ...spec.spectrum.audible.notes, spec.spectrum.ultrasound.marker, ...spec.spectrum.ultrasound.notes]
-    : [];
-  const max = Math.max(1e-9, ...all);
-
-  return (
-    <div class="dbg">
-      <div class="dbghead">
-        <b>debug</b>
-        <span>{spec ? `${(spec.sr / 1000).toFixed(1)}kHz` : "—"} · {S.dbgState.value}</span>
-        <button onClick={runTest} disabled={busy}>{busy ? "testing…" : "self-test"}</button>
-        <button onClick={toggleMon}>{mon ? "monitor ⏹" : "monitor ▶"}</button>
-        <button onClick={() => (S.dbgLog.value = [])}>clear</button>
-      </div>
-      {spec && (
-        <div class="specwrap">
-          <SpecRow label="aud" fr={FREQS.audible} d={spec.spectrum.audible} max={max} />
-          <SpecRow label="ult" fr={FREQS.ultrasound} d={spec.spectrum.ultrasound} max={max} />
-        </div>
-      )}
-      <div class="dbglog">{log.map((l) => <div>{l}</div>)}</div>
     </div>
   );
 }
