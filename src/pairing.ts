@@ -13,6 +13,7 @@ import * as QR from "./qr";
 import * as S from "./state";
 import { decode, linkFor, parseCode } from "./webrtc";
 import { method as methodS } from "./state";
+import { standalone } from "./pwa";
 
 const bc = new BroadcastChannel("share.gnass.buzz");
 const setStatus = (text: string, dot = "wait") => (S.pairStatus.value = { text, dot });
@@ -96,6 +97,11 @@ export function initRouting() {
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.has("o")) { active = "camera"; QR.startFromCode(hash.get("o")!); S.screen.value = "pair"; }
   else if (hash.has("a")) startHandoff(hash.get("a")!);
+  // Installed to the home screen: launching the app IS the intent to pair, so skip
+  // the chooser and go straight to QR. The other methods stay one tap away behind
+  // "Use a different method"; in a browser tab we still land on the chooser, where
+  // the intro and install prompt have somewhere to live.
+  else if (standalone()) void chooseMethod("camera");
   else S.screen.value = "choose";
 }
 

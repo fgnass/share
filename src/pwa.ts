@@ -1,7 +1,9 @@
 import { canInstall } from "./state";
 
 let deferred: any = null;
-const standalone = () => matchMedia("(display-mode: standalone)").matches || (navigator as any).standalone === true;
+// Installed to the home screen (or otherwise running outside a browser tab).
+// `navigator.standalone` is the iOS-only spelling.
+export const standalone = () => matchMedia("(display-mode: standalone)").matches || (navigator as any).standalone === true;
 
 addEventListener("beforeinstallprompt", (e) => {
   e.preventDefault(); // keep our own button in charge of when to prompt
