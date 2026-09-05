@@ -3,6 +3,7 @@ import "./style.css";
 import "./pwa";
 import { App } from "./App";
 import { initRouting } from "./pairing";
+import { applyDemo } from "./demo";
 import { BUILD_ID } from "./state";
 
 // Log the build up front so it's visible in the console of a device that's
@@ -10,4 +11,6 @@ import { BUILD_ID } from "./state";
 console.log(`%c[share] build ${BUILD_ID}`, "color:#acff69;font-weight:bold");
 
 render(<App />, document.getElementById("app")!);
-initRouting();
+// `?demo=<scene>` stages a scripted frame for screenshots instead of pairing for
+// real; without it this is a no-op and the normal routing takes over.
+if (!applyDemo()) initRouting();

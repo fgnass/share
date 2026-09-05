@@ -14,6 +14,7 @@ import * as S from "./state";
 import { decode, linkFor, parseCode } from "./webrtc";
 import { method as methodS } from "./state";
 import { standalone } from "./pwa";
+import { demoScene } from "./demo";
 
 const bc = new BroadcastChannel("share.gnass.buzz");
 const setStatus = (text: string, dot = "wait") => (S.pairStatus.value = { text, dot });
@@ -37,9 +38,11 @@ export const reconnect = () => location.replace(location.origin + location.pathn
 
 // The Pair component registers its <video> when the camera panel mounts. We scan
 // for as long as we're on the QR route and not yet connected — both devices keep
-// scanning the whole time, because either one's answer may be the winner.
+// scanning the whole time, because either one's answer may be the winner. A
+// staged screenshot wants the panel but no live webcam (see demo.ts), so it
+// leaves the video element unwired and the .scanview backdrop shows through.
 export function registerVideo(el: HTMLVideoElement | null) {
-  if (el && methodS.value === "camera" && !C.isEntered()) QR.startCamera(el);
+  if (el && !demoScene() && methodS.value === "camera" && !C.isEntered()) QR.startCamera(el);
   else if (!el) QR.stopCamera();
 }
 
