@@ -8,6 +8,12 @@ STUN server is opt-in for connecting across networks.
 
 Built with Preact + Signals in TypeScript.
 
+<p align="center">
+  <img src="./public/screenshots/room.png" alt="A connected room: chat and file transfers" width="280" />
+  &nbsp;&nbsp;
+  <img src="./public/screenshots/pair.png" alt="Pairing by QR code" width="280" />
+</p>
+
 ## How it works
 
 - **Start screen:** a short intro explains the flow; "Connect a device" opens the
@@ -34,7 +40,13 @@ MIT — see [LICENSE](LICENSE).
 ```bash
 npm install
 npm run dev
+npm run screenshot  # regenerate the README screenshots (Playwright)
 ```
+
+The screenshots above are generated, not hand-captured: `?demo=<scene>` stages a
+deterministic frame of the real UI (see `src/demo.ts`) and `npm run screenshot`
+drives a headless browser to capture it at 780 × 1688. Re-run it whenever the UI
+changes.
 
 ## Build
 
