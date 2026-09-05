@@ -67,23 +67,36 @@ function stageRoom() {
   S.screen.value = "room";
   S.roomStatus.value = { text: "Connected", ok: true, showReconnect: false };
   S.saveDirName.value = "Downloads/share";
+  // No chat in this scene. The two devices are side by side — that is what the
+  // QR pairing is for — so their owners just talk, and what actually goes over
+  // the wire is the thing they can't hand over by talking: files, in both
+  // directions, at sizes that make a cloud round trip the annoying option.
   S.messages.value = [
     { id: S.nextId(), kind: "sys", text: "Connected — nothing is uploaded." },
-    { id: S.nextId(), kind: "chat", mine: false, text: "Got the photos from the hike?" },
-    { id: S.nextId(), kind: "chat", mine: true, text: "Sending them over now — no upload, straight to you." },
     {
-      id: S.nextId(), kind: "batch", mine: true, name: "hike-photos",
-      count: 24, doneCount: 24, size: 86_500_000, progress: 100, done: true,
+      id: S.nextId(), kind: "batch", mine: true, name: "shoot-2024-raw",
+      count: 148, doneCount: 148, size: 3_140_000_000, progress: 100, done: true,
     },
-    { id: S.nextId(), kind: "chat", mine: false, text: "Perfect. Here's the map I marked up." },
     {
-      id: S.nextId(), kind: "file", mine: false, name: "ridge-route.gpx",
-      size: 412_000, progress: 100, done: true, savedTo: "Downloads/share",
+      id: S.nextId(), kind: "file", mine: false, name: "colour-grade.cube",
+      size: 1_870_000, progress: 100, done: true, savedTo: "Downloads/share",
     },
-    { id: S.nextId(), kind: "chat", mine: true, text: "Nice. Sending you the panorama too." },
     {
-      id: S.nextId(), kind: "file", mine: true, name: "summit-pano.heic",
-      size: 18_300_000, progress: 62, done: false,
+      id: S.nextId(), kind: "file", mine: true, name: "location-audio.wav",
+      size: 512_000_000, progress: 100, done: true,
+    },
+    {
+      id: S.nextId(), kind: "batch", mine: false, name: "stills-selects",
+      count: 62, doneCount: 62, size: 940_000_000, progress: 100, done: true,
+      savedTo: "Downloads/share",
+    },
+    {
+      id: S.nextId(), kind: "file", mine: false, name: "interview-cam-b.mov",
+      size: 1_420_000_000, progress: 100, done: true, savedTo: "Downloads/share",
+    },
+    {
+      id: S.nextId(), kind: "file", mine: true, name: "rough-cut-v3.mp4",
+      size: 684_000_000, progress: 71, done: false,
     },
   ];
 }

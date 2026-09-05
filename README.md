@@ -9,7 +9,7 @@ STUN server is opt-in for connecting across networks.
 Built with Preact + Signals in TypeScript.
 
 <p align="center">
-  <img src="./public/screenshots/room.png" alt="A connected room: chat and file transfers" width="280" />
+  <img src="./public/screenshots/room.png" alt="A connected room, transferring files both ways" width="280" />
   &nbsp;&nbsp;
   <img src="./public/screenshots/pair.png" alt="Pairing by QR code" width="280" />
 </p>
