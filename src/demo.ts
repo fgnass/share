@@ -69,34 +69,35 @@ function stageRoom() {
   S.saveDirName.value = "Downloads/share";
   // No chat in this scene. The two devices are side by side — that is what the
   // QR pairing is for — so their owners just talk, and what actually goes over
-  // the wire is the thing they can't hand over by talking: files, in both
-  // directions, at sizes that make a cloud round trip the annoying option.
+  // the wire is the thing they can't hand over by talking: a build to sideload,
+  // a document to read, an archive back. Both directions, so it doesn't read as
+  // a one-way upload.
   S.messages.value = [
     { id: S.nextId(), kind: "sys", text: "Connected — nothing is uploaded." },
     {
-      id: S.nextId(), kind: "batch", mine: true, name: "shoot-2024-raw",
-      count: 148, doneCount: 148, size: 3_140_000_000, progress: 100, done: true,
+      id: S.nextId(), kind: "file", mine: true, name: "app-release-v2.4.1.apk",
+      size: 47_300_000, progress: 100, done: true,
     },
     {
-      id: S.nextId(), kind: "file", mine: false, name: "colour-grade.cube",
-      size: 1_870_000, progress: 100, done: true, savedTo: "Downloads/share",
+      id: S.nextId(), kind: "file", mine: false, name: "crash-report.pdf",
+      size: 2_140_000, progress: 100, done: true, savedTo: "Downloads/share",
     },
     {
-      id: S.nextId(), kind: "file", mine: true, name: "location-audio.wav",
-      size: 512_000_000, progress: 100, done: true,
-    },
-    {
-      id: S.nextId(), kind: "batch", mine: false, name: "stills-selects",
-      count: 62, doneCount: 62, size: 940_000_000, progress: 100, done: true,
+      id: S.nextId(), kind: "batch", mine: false, name: "design-handoff",
+      count: 34, doneCount: 34, size: 128_000_000, progress: 100, done: true,
       savedTo: "Downloads/share",
     },
     {
-      id: S.nextId(), kind: "file", mine: false, name: "interview-cam-b.mov",
-      size: 1_420_000_000, progress: 100, done: true, savedTo: "Downloads/share",
+      id: S.nextId(), kind: "file", mine: true, name: "invoices-q3.zip",
+      size: 18_900_000, progress: 100, done: true,
     },
     {
-      id: S.nextId(), kind: "file", mine: true, name: "rough-cut-v3.mp4",
-      size: 684_000_000, progress: 71, done: false,
+      id: S.nextId(), kind: "file", mine: false, name: "contract-signed.pdf",
+      size: 3_620_000, progress: 100, done: true, savedTo: "Downloads/share",
+    },
+    {
+      id: S.nextId(), kind: "file", mine: true, name: "logs-2024-09-05.zip",
+      size: 96_400_000, progress: 68, done: false,
     },
   ];
 }
