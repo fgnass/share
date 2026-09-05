@@ -42,9 +42,11 @@ export function applyDemo(): boolean {
   if (!scene) return false;
   batch(() => (scene === "pair" ? stagePair() : stageRoom()));
   // One frame for Preact to render the staged signals, then flag readiness.
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    (globalThis as any)[READY_FLAG] = true;
-  }));
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      (globalThis as any)[READY_FLAG] = true;
+    }),
+  );
   return true;
 }
 
@@ -60,7 +62,10 @@ function stagePair() {
   S.camOn.value = true;
   S.pairIntro.value =
     "Point the two devices at each other. Each shows a code and reads the other's. Data goes straight between the devices. Nothing is uploaded.";
-  S.pairStatus.value = { text: "Point the devices at each other.", dot: "wait" };
+  S.pairStatus.value = {
+    text: "Point the devices at each other.",
+    dot: "wait",
+  };
 }
 
 function stageRoom() {
@@ -73,32 +78,67 @@ function stageRoom() {
   // goes out, screenshots come back, a fixed build goes out, more screenshots
   // and the log come back. Both directions, so it doesn't read as an upload.
   S.messages.value = [
-    { id: S.nextId(), kind: "sys", text: "Connected — nothing is uploaded." },
+    { id: S.nextId(), kind: "sys", text: "Connected. Nothing is uploaded." },
     {
-      id: S.nextId(), kind: "file", mine: true, name: "app-release-v2.4.0.apk",
-      size: 47_300_000, progress: 100, done: true,
+      id: S.nextId(),
+      kind: "file",
+      mine: true,
+      name: "app-release-v2.4.0.apk",
+      size: 47_300_000,
+      progress: 100,
+      done: true,
     },
     {
-      id: S.nextId(), kind: "batch", mine: false, name: "screenshots",
-      count: 6, doneCount: 6, size: 14_800_000, progress: 100, done: true,
+      id: S.nextId(),
+      kind: "batch",
+      mine: false,
+      name: "screenshots",
+      count: 6,
+      doneCount: 6,
+      size: 14_800_000,
+      progress: 100,
+      done: true,
       savedTo: "Downloads/share",
     },
     {
-      id: S.nextId(), kind: "file", mine: false, name: "logcat-v2.4.0.zip",
-      size: 6_120_000, progress: 100, done: true, savedTo: "Downloads/share",
-    },
-    {
-      id: S.nextId(), kind: "file", mine: true, name: "app-release-v2.4.1.apk",
-      size: 47_400_000, progress: 100, done: true,
-    },
-    {
-      id: S.nextId(), kind: "batch", mine: false, name: "screenshots-v2.4.1",
-      count: 9, doneCount: 9, size: 22_100_000, progress: 100, done: true,
+      id: S.nextId(),
+      kind: "file",
+      mine: false,
+      name: "logcat-v2.4.0.zip",
+      size: 6_120_000,
+      progress: 100,
+      done: true,
       savedTo: "Downloads/share",
     },
     {
-      id: S.nextId(), kind: "file", mine: false, name: "logcat-v2.4.1.zip",
-      size: 8_640_000, progress: 74, done: false,
+      id: S.nextId(),
+      kind: "file",
+      mine: true,
+      name: "app-release-v2.4.1.apk",
+      size: 47_400_000,
+      progress: 100,
+      done: true,
+    },
+    {
+      id: S.nextId(),
+      kind: "batch",
+      mine: false,
+      name: "screenshots-v2.4.1",
+      count: 9,
+      doneCount: 9,
+      size: 22_100_000,
+      progress: 100,
+      done: true,
+      savedTo: "Downloads/share",
+    },
+    {
+      id: S.nextId(),
+      kind: "file",
+      mine: false,
+      name: "logcat-v2.4.1.zip",
+      size: 8_640_000,
+      progress: 74,
+      done: false,
     },
   ];
 }
