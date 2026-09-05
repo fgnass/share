@@ -118,6 +118,12 @@ button.ghost {
 button.ghost:hover { transform: none; border-color: var(--ink); background: rgba(255, 255, 255, 0.04); }
 button.ghost:active { transform: translateY(1px); }
 button svg { width: 17px; height: 17px; }
+/* The icon wrapper must not be an inline box: on a baseline it reserves room for
+   descenders below the glyph, which pushes the SVG a few pixels up inside any
+   flex-centred parent (the composer's round buttons showed 11px above / 14px
+   below). display:flex drops the baseline so the span is just a box round the
+   SVG, and every icon centres on its actual bounds. */
+.icon { display: flex; }
 
 .row { display: flex; gap: 8px; }
 .row button { flex: 1; }

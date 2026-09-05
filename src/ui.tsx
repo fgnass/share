@@ -11,7 +11,7 @@ const ICONS: Record<string, any> = {
 
 export function Icon({ name }: { name: string }) {
   return (
-    <span ref={(el) => { if (el && !el.firstChild && ICONS[name]) el.replaceChildren(lucide(ICONS[name])); }} />
+    <span class="icon" ref={(el) => { if (el && !el.firstChild && ICONS[name]) el.replaceChildren(lucide(ICONS[name])); }} />
   );
 }
 
