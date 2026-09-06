@@ -26,10 +26,8 @@ export type DemoScene = "pair" | "room";
 /** Window flag the screenshot script polls once the staged frame is ready. */
 const READY_FLAG = "__shareDemoReady";
 
-// A fixed code, so the QR is pixel-identical across runs. Length and shape match
-// a real compacted offer (see webrtc.ts) — the QR's density is part of the shot.
-const DEMO_CODE =
-  "1t7XkQ2mDfLpR9vAzYc4NbHs8JeWuG3xTMoi5PZqrKdlEnCyU0aBSfVhjw6OtIgXR2mQpLfD9vAz";
+// What the staged QR encodes. Fixed, so the code is pixel-identical across runs.
+const DEMO_QR_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 
 export const demoScene = (): DemoScene | null => {
   const v = new URLSearchParams(location.search).get("demo");
@@ -51,11 +49,10 @@ export function applyDemo(): boolean {
 }
 
 function stagePair() {
-  const link = location.origin + location.pathname + "#o=" + DEMO_CODE;
   S.screen.value = "pair";
   S.method.value = "camera";
-  S.qrUrl.value = link;
-  S.myLink.value = link;
+  S.qrUrl.value = DEMO_QR_URL;
+  S.myLink.value = DEMO_QR_URL;
   // Show the scan panel without touching getUserMedia: .scanview paints black
   // behind the frame, which is exactly the "camera is up, pointed at nothing"
   // look we want in a still.
