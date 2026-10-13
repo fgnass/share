@@ -24,6 +24,7 @@ export const pairIntro = signal("");
 export const pairStatus = signal<{ text: string; dot: string }>({ text: "", dot: "wait" });
 export const qrUrl = signal("");            // URL rendered as the QR (empty = none)
 export const myLink = signal("");           // shareable link (link method)
+export const answering = signal(false);    // we opened their link and only send a reply back
 export const camOn = signal(false);         // camera preview visible
 export const camError = signal(false);
 

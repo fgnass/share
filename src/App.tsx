@@ -136,19 +136,22 @@ function Camera() {
 // thing that exists and is therefore true on both sides.
 function LinkPanel() {
   const paste = useRef<HTMLTextAreaElement>(null);
+  const reply = S.answering.value;
   return (
     <div id="linkPanel">
-      <p>Send this link to the other device over any chat, and keep this tab open until they join.</p>
+      <p>{reply
+        ? "Almost there. Send this reply link back the same way you got theirs, and keep this tab open until you are connected."
+        : "Send this link to the other device over any chat, and keep this tab open until they join."}</p>
       <div class="row">
-        <button class="ghost" onClick={() => P.share(S.myLink.value)}><Icon name="share" />Share link</button>
-        <button class="ghost" onClick={() => P.share(S.myLink.value)}><Icon name="copy" />Copy</button>
+        <button class="ghost" onClick={() => P.share(S.myLink.value)}><Icon name="share" />{reply ? "Share reply" : "Share link"}</button>
+        <button class="ghost" onClick={() => P.copy(S.myLink.value)}><Icon name="copy" />Copy</button>
       </div>
       <div id="pairLink" class="link">{S.myLink.value}</div>
-      <details style="margin-top:12px">
+      {!reply && <details style="margin-top:12px">
         <summary>Got a code back from the other device? Paste it</summary>
         <textarea ref={paste} rows={3} placeholder="Link or code" style="margin-top:10px" />
         <button class="ghost" style="margin-top:8px" onClick={() => P.applyPaste(paste.current?.value || "")}>Apply</button>
-      </details>
+      </details>}
     </div>
   );
 }

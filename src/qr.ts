@@ -29,8 +29,11 @@ const setStatus = (text: string, dot = "wait") => (S.pairStatus.value = { text, 
 function show() {
   const neg = myAnswer || myOffer;
   if (!neg) return;
-  S.myLink.value = linkFor(neg.tag === "answer" ? "a" : "o", neg.code);
-  S.qrUrl.value = S.method.value === "camera" ? S.myLink.value : "";
+  const link = linkFor(neg.tag === "answer" ? "a" : "o", neg.code);
+  // A link sent over chat is tagged, so the device that opens it knows there is
+  // no line of sight and shows a link to send back instead of a QR to scan.
+  S.myLink.value = S.method.value === "link" ? link + "&m=l" : link;
+  S.qrUrl.value = S.method.value === "camera" ? link : "";
 }
 
 // One status line, derived from what exists — not set ad-hoc per branch. The old
@@ -180,6 +183,7 @@ export async function start() {
 // Pasted or opened as a link (#o=…): we only answer, there is no race to run
 // because we never showed an offer they could scan.
 export async function startFromCode(code: string) {
+  S.answering.value = true;
   S.pairIntro.value = "Almost there. Send this reply code back the same way you got theirs — or show it to their camera.";
   S.camOn.value = false;
   try {

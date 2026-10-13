@@ -67,9 +67,36 @@ export function applyPaste(text: string) {
   void QR.acceptPasted(parsed);
 }
 
+// The async Clipboard API only exists in secure contexts (HTTPS or localhost).
+// On a plain-HTTP LAN address fall back to the legacy copy command, which works
+// from a click handler without a secure context.
+function legacyCopy(text: string): boolean {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(ta);
+  ta.select(); ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch {}
+  ta.remove();
+  return ok;
+}
+
+export async function copy(text: string) {
+  let ok = false;
+  try { if (navigator.clipboard) { await navigator.clipboard.writeText(text); ok = true; } } catch {}
+  if (!ok) ok = legacyCopy(text);
+  if (ok) alert("Link copied");
+  else prompt("Copy this link:", text);
+}
+
 export async function share(url: string) {
-  try { if (navigator.share) return await navigator.share({ url, title: "share.gnass.buzz" }); } catch {}
-  try { await navigator.clipboard.writeText(url); alert("Link copied"); } catch {}
+  if (navigator.share) {
+    try { return await navigator.share({ url, title: "share.gnass.buzz" }); }
+    catch (e) { if ((e as Error).name === "AbortError") return; }
+  }
+  await copy(url);
 }
 
 // ── Handoff tab (#a=) ──
@@ -98,7 +125,12 @@ export function initRouting() {
   // a suspended mobile tab often drops the connection without firing any event.
   document.addEventListener("visibilitychange", () => { if (!document.hidden) C.reflectConn(); });
   const hash = new URLSearchParams(location.hash.slice(1));
-  if (hash.has("o")) { active = "camera"; QR.startFromCode(hash.get("o")!); S.screen.value = "pair"; }
+  if (hash.has("o")) {
+    // "m=l": the offer came as a link over chat, so reply with a link too.
+    active = methodS.value = hash.get("m") === "l" ? "link" : "camera";
+    QR.startFromCode(hash.get("o")!);
+    S.screen.value = "pair";
+  }
   else if (hash.has("a")) startHandoff(hash.get("a")!);
   // Installed to the home screen: launching the app IS the intent to pair, so skip
   // the chooser and go straight to QR. The other methods stay one tap away behind
