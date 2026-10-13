@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import preact from "@preact/preset-vite";
+import basicSsl from "@vitejs/plugin-basic-ssl";
 import { execSync } from "node:child_process";
 
 // A short build identifier so you can tell at a glance whether two devices run
@@ -18,6 +19,8 @@ function buildId(): string {
 // Relative base so the built assets work no matter what path the app is hosted at.
 export default defineConfig({
   base: "./",
-  plugins: [preact()],
+  // `npm run dev:lan` serves HTTPS on the LAN with a self-signed certificate, so
+  // a phone gets a secure context (camera, clipboard, wake lock) for testing.
+  plugins: [preact(), ...(process.env.HTTPS ? [basicSsl()] : [])],
   define: { __BUILD_ID__: JSON.stringify(buildId()) },
 });

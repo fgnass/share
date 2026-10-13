@@ -40,6 +40,7 @@ MIT — see [LICENSE](LICENSE).
 ```bash
 npm install
 npm run dev
+npm run dev:lan     # HTTPS on the LAN (self-signed) to test with a phone
 npm run screenshot  # regenerate the README screenshots (Playwright)
 ```
 
