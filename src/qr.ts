@@ -140,11 +140,18 @@ function decodeSdp(code: string): string { return decode(code).sdp; }
 // reaching this point means an exchange is live.
 let timer: ReturnType<typeof setTimeout> | null = null;
 function clearWatch() { if (timer) { clearTimeout(timer); timer = null; } }
+// Chrome gates WebRTC to LAN addresses behind the "Local network access" site
+// permission. When it is denied, STUN won't help on a shared network — say so.
+async function lnaDenied(): Promise<boolean> {
+  try { return (await navigator.permissions.query({ name: "local-network-access" as PermissionName })).state === "denied"; }
+  catch { return false; }   // unknown permission name → browser doesn't gate this
+}
 function armWatch() {
   clearWatch();
-  timer = setTimeout(() => {
+  timer = setTimeout(async () => {
     timer = null;
     if (C.isEntered()) return;
+    if (await lnaDenied()) return setStatus("Your browser blocks local network access for this site. Allow \"Local network access\" in the site settings, then reload.", "err");
     if (!S.useStun.value) S.stunPrompt.value = true;
     else setStatus("Still couldn't connect. The networks may block direct links.", "err");
   }, 9000);
