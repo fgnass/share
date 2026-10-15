@@ -59,6 +59,8 @@ function Choose() {
         <a id="ghLink" href="https://github.com/fgnass/share" target="_blank" rel="noopener"><Icon name="github" />GitHub</a>
         <span class="dot-sep">·</span>
         <a href="https://github.com/fgnass/share/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+        <span class="dot-sep">·</span>
+        <a href="https://gnass.buzz/privacy/" target="_blank" rel="noopener">Privacy</a>
       </footer>
       <p class="build" title="Build version — check it matches on both devices">{S.BUILD_ID}</p>
     </section>

@@ -164,9 +164,14 @@ button.back:hover { color: var(--ink); border-color: var(--border); background: 
 #how .how-methods li { color: var(--muted); font-size: 0.9rem; line-height: 1.5; padding-left: 0.9rem; border-left: 2px solid var(--border); }
 #how #howBack { margin-top: 1.6rem; }
 #choose .foot {
-  display: flex; align-items: center; justify-content: center; gap: 10px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 10px;
   margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);
   font-size: 0.78rem;
+}
+/* Narrow screens: the links wrap; without the dots no line ends in a separator. */
+@media (max-width: 420px) {
+  #choose .foot { gap: 6px 18px; }
+  #choose .foot .dot-sep { display: none; }
 }
 #choose .foot a {
   display: inline-flex; align-items: center; gap: 6px;
